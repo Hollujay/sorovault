@@ -52,6 +52,10 @@ type Registry struct {
 
 	// expectPassphrase, when set, must match what the endpoint reports.
 	expectPassphrase string
+	// peer, when set, is the URL of a peer SoroVault instance to mirror
+	// contracts from. When non-empty, the registry will periodically import
+	// contracts from the peer's API endpoint.
+	peer string
 
 	// sem bounds how many registrations and refreshes run at once, and
 	// acquireTimeout bounds how long one waits for a slot. The budget is
@@ -86,6 +90,9 @@ type Options struct {
 	// it is refused with ErrBusy. Values below one mean
 	// DefaultAcquireTimeout.
 	AcquireTimeout time.Duration
+	// Peer is the URL of a peer SoroVault instance to mirror contracts from.
+	// When set, the registry will import contracts from the peer's API.
+	Peer string
 }
 
 // New builds a Registry from its three collaborators.
@@ -108,6 +115,7 @@ func New(f stellar.Fetcher, d spec.Decoder, s store.Store, opts Options) *Regist
 		store:            s,
 		log:              log,
 		expectPassphrase: opts.ExpectPassphrase,
+		peer:             opts.Peer,
 		sem:              semaphore.NewWeighted(int64(maxConcurrent)),
 		acquireTimeout:   acquireTimeout,
 		maxConcurrent:    maxConcurrent,
