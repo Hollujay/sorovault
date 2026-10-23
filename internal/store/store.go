@@ -61,6 +61,21 @@ type Contract struct {
 	FirstSeen       time.Time `json:"first_seen"`
 	LastRefreshed   time.Time `json:"last_refreshed"`
 
+	// Creator is the account that created the contract, and CreatedLedger
+	// the ledger it was created in. Both are zero when they could not be
+	// determined: the RPC only keeps recent history, so a contract older
+	// than its retention window usually has neither.
+	Creator       string `json:"creator,omitempty"`
+	CreatedLedger uint32 `json:"created_ledger,omitempty"`
+
+	// VerifiedBy is the account whose signed claim verified this contract's
+	// publisher, VerifiedAt when the claim was accepted, and
+	// VerifiedWasmHash the version the claim was made for. All are zero for
+	// a contract nobody has verified.
+	VerifiedBy       string     `json:"verified_by,omitempty"`
+	VerifiedAt       *time.Time `json:"verified_at,omitempty"`
+	VerifiedWasmHash string     `json:"verified_wasm_hash,omitempty"`
+
 	// MissingSince is when a refresh first found the contract absent from
 	// the network. It is nil while the contract is live, and is cleared by
 	// the next save, which only happens once the contract has been fetched
@@ -71,6 +86,19 @@ type Contract struct {
 	// a search query matched. It is only set on search results, and is
 	// empty when the query matched the contract ID or name instead.
 	Matches []string `json:"matches,omitempty"`
+}
+
+// Verified reports whether a publisher has verified the contract.
+func (c Contract) Verified() bool { return c.VerifiedBy != "" && c.VerifiedAt != nil }
+
+// Verification is an accepted publisher claim.
+type Verification struct {
+	// Publisher is the account that signed the claim.
+	Publisher string
+	// VerifiedAt is when the registry accepted it.
+	VerifiedAt time.Time
+	// WasmHash is the version of the contract the claim was made for.
+	WasmHash string
 }
 
 // symbolSeparator joins symbol names into the single searchable string the
@@ -395,6 +423,22 @@ type UpgradePage struct {
 type Store interface {
 	// UpdateSource attaches repository metadata to an existing contract.
 	UpdateSource(ctx context.Context, network, contractID, sourceURL, sourceCommit string) error
+
+	// SetOrigin records who created the contract and in which ledger. Both
+	// must be set; recording an origin is how an unknown one becomes known.
+	SetOrigin(ctx context.Context, network, contractID, creator string, ledger uint32) error
+
+	// SetVerified records an accepted publisher claim, together with the
+	// name and source the claim carried, in one step so a contract is never
+	// verified for a name or source it does not have.
+	SetVerified(ctx context.Context, network, contractID, name, sourceURL, sourceCommit string, v Verification) error
+
+	// GetState returns a small persisted value, such as the refresher's
+	// event cursor. It returns ErrNotFound when the key was never set.
+	GetState(ctx context.Context, key string) (string, error)
+
+	// SetState stores a value under key, replacing any earlier one.
+	SetState(ctx context.Context, key, value string) error
 
 	// Delete removes a contract and every interface version stored for it.
 	// It returns ErrNotFound when the contract is not in the registry.

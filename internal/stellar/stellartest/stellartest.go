@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strconv"
 	"sync"
 
 	"github.com/soroworks/sorovault/internal/stellar"
@@ -43,18 +44,38 @@ type Fake struct {
 	// not never reach it.
 	BeforeFetch func(ctx context.Context, contractID string) error
 
+	origins map[string]stellar.Origin
+
+	// updates is the log of executable updates; a cursor is the number of
+	// events already read, and expiredBefore is how many have fallen out of
+	// the fake network's retention.
+	updates       []stellar.ExecutableUpdate
+	expiredBefore int
+	ledger        uint32
+
+	// OriginErr and EventsErr, when set, are returned by FindOrigin and
+	// ExecutableUpdates instead of a result.
+	OriginErr error
+	EventsErr error
+
 	// Calls counts invocations by method name, so a test can assert that
 	// refreshing an unchanged contract did not download its module.
 	Calls map[string]int
 }
 
-var _ stellar.Fetcher = (*Fake)(nil)
+var (
+	_ stellar.Fetcher        = (*Fake)(nil)
+	_ stellar.OriginFinder   = (*Fake)(nil)
+	_ stellar.UpdateFollower = (*Fake)(nil)
+)
 
 // New returns an empty fake network reporting the testnet passphrase.
 func New() *Fake {
 	return &Fake{
 		contracts:  map[string][]byte{},
 		wasm:       map[string][]byte{},
+		origins:    map[string]stellar.Origin{},
+		ledger:     1000,
 		Passphrase: stellar.NetworkTestnet,
 		Calls:      map[string]int{},
 	}
@@ -79,8 +100,108 @@ func (f *Fake) Deploy(contractID string, wasmModule []byte) {
 // Upgrade replaces a contract's module, as an on-chain upgrade would. The
 // new module must differ from the old one, or the hash will not change and
 // the upgrade will be invisible to a refresh.
+//
+// Like the host, it records an executable_update event, which is what an
+// UpdateFollower reads.
 func (f *Fake) Upgrade(contractID string, wasmModule []byte) {
-	f.Deploy(contractID, wasmModule)
+	f.mu.Lock()
+	old, existed := f.contracts[contractID]
+	f.contracts[contractID] = wasmModule
+	f.ledger++
+	if existed {
+		f.updates = append(f.updates, stellar.ExecutableUpdate{
+			ContractID:  contractID,
+			OldWasmHash: HashOf(old),
+			NewWasmHash: HashOf(wasmModule),
+			Ledger:      f.ledger,
+		})
+	}
+	f.mu.Unlock()
+}
+
+// SetOrigin makes FindOrigin report who created a contract. A contract with
+// no origin set has an unknown one, as an old contract does on a real RPC.
+func (f *Fake) SetOrigin(contractID, creator string, ledger uint32) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.origins[contractID] = stellar.Origin{Creator: creator, Ledger: ledger}
+}
+
+// ExpireEvents drops every event recorded so far from the fake network's
+// retention, so a reader holding an older cursor has missed them.
+func (f *Fake) ExpireEvents() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.expiredBefore = len(f.updates)
+}
+
+// FindOrigin implements stellar.OriginFinder.
+func (f *Fake) FindOrigin(ctx context.Context, contractID string) (*stellar.Origin, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls["FindOrigin"]++
+
+	if f.OriginErr != nil {
+		return nil, f.OriginErr
+	}
+	origin, ok := f.origins[contractID]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", stellar.ErrOriginUnknown, contractID)
+	}
+	return &origin, nil
+}
+
+// LatestLedger implements stellar.UpdateFollower.
+func (f *Fake) LatestLedger(ctx context.Context) (uint32, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls["LatestLedger"]++
+	return f.ledger, nil
+}
+
+// ExecutableUpdates implements stellar.UpdateFollower. A cursor is the count
+// of events already consumed; a start ledger skips events before it.
+func (f *Fake) ExecutableUpdates(ctx context.Context, from stellar.UpdatePosition, limit int) (*stellar.UpdatePage, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls["ExecutableUpdates"]++
+
+	if f.EventsErr != nil {
+		return nil, f.EventsErr
+	}
+
+	next := 0
+	if from.Cursor != "" {
+		n, err := strconv.Atoi(from.Cursor)
+		if err != nil || n < f.expiredBefore {
+			return nil, stellar.ErrPositionExpired
+		}
+		next = n
+	} else {
+		for next < len(f.updates) && f.updates[next].Ledger < from.StartLedger {
+			next++
+		}
+	}
+	if limit <= 0 {
+		limit = len(f.updates)
+	}
+
+	end := min(next+limit, len(f.updates))
+	return &stellar.UpdatePage{
+		Updates:      append([]stellar.ExecutableUpdate(nil), f.updates[next:end]...),
+		Cursor:       strconv.Itoa(end),
+		LatestLedger: f.ledger,
+		More:         end < len(f.updates),
+	}, nil
 }
 
 // Remove makes contractID stop resolving, as an expired entry would.

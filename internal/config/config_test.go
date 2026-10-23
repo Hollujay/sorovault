@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"encoding/base64"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -24,7 +25,8 @@ func setEnv(t *testing.T, vars map[string]string) {
 		"RPC_URL", "NETWORK_PASSPHRASE", "DATABASE_URL", "DATABASE_URL_FILE",
 		"HTTP_ADDR", "LOG_LEVEL", "RPC_TIMEOUT", "REFRESH_INTERVAL",
 		"MAX_CONCURRENT_REGISTRATIONS", "REFRESH_WEBHOOK_URL",
-		"REFRESH_WEBHOOK_SECRET",
+		"REFRESH_WEBHOOK_SECRET", "REFRESH_EVENTS", "REFRESH_EVENTS_INTERVAL",
+		"SIGNING_KEY", "SIGNING_KEY_FILE", "SIGNING_RETIRED_KEYS",
 	} {
 		if v, ok := vars[key]; ok {
 			t.Setenv(key, v)
@@ -320,4 +322,86 @@ func TestLoadDatabaseURLFromFile(t *testing.T) {
 		assert.NotContains(t, err.Error(), testDatabaseURL)
 		assert.Contains(t, err.Error(), f)
 	})
+}
+
+func TestLoadEvents(t *testing.T) {
+	t.Run("off by default, with the default interval", func(t *testing.T) {
+		setEnv(t, map[string]string{"DATABASE_URL": testDatabaseURL})
+		cfg, err := config.Load()
+		require.NoError(t, err)
+		assert.False(t, cfg.RefreshEvents)
+		assert.Equal(t, config.DefaultRefreshEventsInterval, cfg.RefreshEventsInterval)
+	})
+
+	t.Run("on, beside polling", func(t *testing.T) {
+		setEnv(t, map[string]string{
+			"DATABASE_URL": testDatabaseURL, "REFRESH_INTERVAL": "1h",
+			"REFRESH_EVENTS": "true", "REFRESH_EVENTS_INTERVAL": "3s",
+		})
+		cfg, err := config.Load()
+		require.NoError(t, err)
+		assert.True(t, cfg.RefreshEvents)
+		assert.Equal(t, 3*time.Second, cfg.RefreshEventsInterval)
+	})
+
+	for name, vars := range map[string]map[string]string{
+		"events without the polling safety net": {"REFRESH_EVENTS": "true"},
+		"not a boolean":                         {"REFRESH_EVENTS": "maybe", "REFRESH_INTERVAL": "1h"},
+		"interval too short":                    {"REFRESH_EVENTS_INTERVAL": "100ms"},
+		"interval not a duration":               {"REFRESH_EVENTS_INTERVAL": "soon"},
+	} {
+		t.Run("rejects "+name, func(t *testing.T) {
+			vars["DATABASE_URL"] = testDatabaseURL
+			setEnv(t, vars)
+			_, err := config.Load()
+			assert.Error(t, err)
+		})
+	}
+}
+
+func TestLoadSigning(t *testing.T) {
+	seed := base64.StdEncoding.EncodeToString(make([]byte, 32))
+	retired := base64.StdEncoding.EncodeToString(make([]byte, 32))
+
+	t.Run("no key, no signer", func(t *testing.T) {
+		setEnv(t, map[string]string{"DATABASE_URL": testDatabaseURL})
+		cfg, err := config.Load()
+		require.NoError(t, err)
+		assert.Nil(t, cfg.Signer)
+	})
+
+	t.Run("a key from the environment", func(t *testing.T) {
+		setEnv(t, map[string]string{"DATABASE_URL": testDatabaseURL, "SIGNING_KEY": seed, "SIGNING_RETIRED_KEYS": retired + ", " + retired})
+		cfg, err := config.Load()
+		require.NoError(t, err)
+		require.NotNil(t, cfg.Signer)
+		assert.Len(t, cfg.Signer.KeyID(), 16)
+		assert.Len(t, cfg.RetiredSigningKeys, 2)
+	})
+
+	t.Run("a key from a file, newline and all", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "key")
+		require.NoError(t, os.WriteFile(path, []byte(seed+"\n"), 0o600))
+		setEnv(t, map[string]string{"DATABASE_URL": testDatabaseURL, "SIGNING_KEY_FILE": path})
+		cfg, err := config.Load()
+		require.NoError(t, err)
+		assert.NotNil(t, cfg.Signer)
+	})
+
+	for name, vars := range map[string]map[string]string{
+		"both inline and file": {"SIGNING_KEY": seed, "SIGNING_KEY_FILE": "/nonexistent"},
+		"missing file":         {"SIGNING_KEY_FILE": "/nonexistent/key"},
+		"not base64":           {"SIGNING_KEY": "!!!"},
+		"wrong length":         {"SIGNING_KEY": base64.StdEncoding.EncodeToString([]byte("short"))},
+		"bad retired key":      {"SIGNING_KEY": seed, "SIGNING_RETIRED_KEYS": "AAAA"},
+		"retired without key":  {"SIGNING_RETIRED_KEYS": retired},
+	} {
+		t.Run("rejects "+name, func(t *testing.T) {
+			vars["DATABASE_URL"] = testDatabaseURL
+			setEnv(t, vars)
+			_, err := config.Load()
+			require.Error(t, err)
+			assert.NotContains(t, err.Error(), seed, "the key must not leak into an error")
+		})
+	}
 }

@@ -267,6 +267,12 @@ func (r *Registry) Register(ctx context.Context, contractID string) (*Result, er
 		return nil, err
 	}
 
+	// Provenance is looked up while the contract is being registered, since
+	// that is when its creation is most likely still in the RPC's history.
+	if existing == nil || existing.Creator == "" {
+		r.recordOrigin(ctx, contractID)
+	}
+
 	saved, err := r.store.GetContract(ctx, network, contractID)
 	if err != nil {
 		return nil, err
@@ -470,3 +476,13 @@ func (r *Registry) markMissing(ctx context.Context, network string, existing *st
 // Store exposes the underlying store for read-only queries the API and UI
 // serve directly, so they do not each need their own handle.
 func (r *Registry) Store() store.Store { return r.store }
+
+// parseHash checks that s is a lower-case hexadecimal SHA-256, the form the
+// registry stores hashes in.
+func parseHash(s string) ([]byte, error) {
+	raw, err := hex.DecodeString(s)
+	if err != nil || len(raw) != sha256.Size || hex.EncodeToString(raw) != s {
+		return nil, fmt.Errorf("%w: %q", ErrInvalidWasmHash, s)
+	}
+	return raw, nil
+}

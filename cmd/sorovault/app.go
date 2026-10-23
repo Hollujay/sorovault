@@ -19,6 +19,7 @@ type app struct {
 	cfg      *config.Config
 	log      *slog.Logger
 	registry *registry.Registry
+	fetcher  stellar.Fetcher
 
 	closers []func() error
 }
@@ -50,6 +51,7 @@ func newApp(ctx context.Context) (*app, error) {
 		cfg:      cfg,
 		log:      log,
 		registry: reg,
+		fetcher:  fetcher,
 		closers:  []func() error{fetcher.Close, db.Close},
 	}, nil
 }

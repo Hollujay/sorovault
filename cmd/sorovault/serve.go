@@ -17,6 +17,7 @@ import (
 	"github.com/soroworks/sorovault/internal/api"
 	"github.com/soroworks/sorovault/internal/refresher"
 	"github.com/soroworks/sorovault/internal/registry"
+	"github.com/soroworks/sorovault/internal/stellar"
 	"github.com/soroworks/sorovault/internal/web"
 )
 
@@ -49,7 +50,7 @@ func newServeCmd() *cobra.Command {
 				// never left writing to a closed pool.
 				defer stopRefresh()
 
-				handler, err := newRouter(a.registry, a.log, refresh)
+				handler, err := newRouter(a.registry, a.log, refresh, a.configureAPI)
 				if err != nil {
 					return err
 				}
@@ -61,6 +62,16 @@ func newServeCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&addr, "addr", "", "listen address (overrides HTTP_ADDR)")
 	return cmd
+}
+
+// configureAPI applies the settings that only exist in a deployment to the
+// API: the interface-signing key, if one is configured.
+func (a *app) configureAPI(server *api.Server) {
+	if a.cfg.Signer == nil {
+		return
+	}
+	server.SetSigner(a.cfg.Signer, a.cfg.RetiredSigningKeys...)
+	a.log.Info("signing interface responses", "key_id", a.cfg.Signer.KeyID())
 }
 
 // startRefresher runs automatic refresh in the background when
@@ -76,12 +87,22 @@ func startRefresher(ctx context.Context, a *app) (r *refresher.Refresher, stop f
 		return nil, nil, err
 	}
 
-	r, err = refresher.New(a.registry, refresher.Options{
+	opts := refresher.Options{
 		Interval: a.cfg.RefreshInterval,
 		Timeout:  a.cfg.RPCTimeout,
 		Notifier: notifier,
 		Logger:   a.log.With("component", "refresher"),
-	})
+	}
+	if a.cfg.RefreshEvents {
+		follower, ok := a.fetcher.(stellar.UpdateFollower)
+		if !ok {
+			return nil, nil, errors.New("REFRESH_EVENTS is set but the configured fetcher cannot read upgrade events")
+		}
+		opts.Events = follower
+		opts.EventsInterval = a.cfg.RefreshEventsInterval
+	}
+
+	r, err = refresher.New(a.registry, opts)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -93,7 +114,10 @@ func startRefresher(ctx context.Context, a *app) (r *refresher.Refresher, stop f
 		_ = r.Run(ctx)
 	}()
 
-	a.log.Info("automatic refresh enabled", "interval", a.cfg.RefreshInterval)
+	a.log.Info("automatic refresh enabled",
+		"interval", a.cfg.RefreshInterval,
+		"events", a.cfg.RefreshEvents,
+		"events_interval", a.cfg.RefreshEventsInterval)
 	return r, func() {
 		cancel()
 		<-done
@@ -122,8 +146,9 @@ func refreshNotifier(a *app) (refresher.Notifier, error) {
 
 // newRouter assembles the JSON API, the browse UI and the health endpoint
 // into one handler. refresh may be nil when automatic refresh is off; the
-// statistics endpoint then has no sweep to report.
-func newRouter(reg *registry.Registry, log *slog.Logger, refresh *refresher.Refresher) (http.Handler, error) {
+// statistics endpoint then has no sweep to report. configure, when set, runs
+// on the API server before its routes are built.
+func newRouter(reg *registry.Registry, log *slog.Logger, refresh *refresher.Refresher, configure ...func(*api.Server)) (http.Handler, error) {
 	ui, err := web.NewServer(reg, log)
 	if err != nil {
 		return nil, err
@@ -132,6 +157,9 @@ func newRouter(reg *registry.Registry, log *slog.Logger, refresh *refresher.Refr
 	server := api.NewServer(reg, log)
 	if refresh != nil {
 		server.SetLastSweep(refresh.LastSweep)
+	}
+	for _, fn := range configure {
+		fn(server)
 	}
 
 	r := chi.NewRouter()

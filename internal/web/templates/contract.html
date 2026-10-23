@@ -32,6 +32,23 @@
     <dd><a href="{{.Contract.SourceURL}}">Repository</a>{{if .Contract.SourceCommit}} <span class="dim">at <code>{{.Contract.SourceCommit}}</code></span>{{end}}</dd>
   </div>
   {{end}}
+  <div>
+    <dt>Deployer</dt>
+    {{if .Contract.Creator}}
+    <dd class="mono break">{{.Contract.Creator}}{{if .Contract.CreatedLedger}} <span class="dim">in ledger {{.Contract.CreatedLedger}}</span>{{end}}</dd>
+    {{else}}
+    <dd class="dim" title="The RPC only keeps recent history, so older contracts usually cannot be traced.">Unknown</dd>
+    {{end}}
+  </div>
+  {{if .Contract.Verified}}
+  <div>
+    <dt>Publisher</dt>
+    <dd>
+      <span class="badge verified" title="The deploying account signed a claim for this contract">Verified</span>
+      <span class="dim">by <code>{{.Contract.VerifiedBy}}</code> on {{.Contract.VerifiedAt.UTC.Format "2006-01-02"}}{{if ne .Contract.VerifiedWasmHash .Contract.CurrentWasmHash}}, for an earlier version{{end}}</span>
+    </dd>
+  </div>
+  {{end}}
   <div><dt>First seen</dt><dd>{{.Contract.FirstSeen.UTC.Format "2006-01-02 15:04"}} UTC</dd></div>
   <div><dt>Decoded</dt><dd>{{.Spec.DecodedAt.UTC.Format "2006-01-02 15:04"}} UTC</dd></div>
   {{if .Contract.MissingSince}}

@@ -195,6 +195,10 @@ All configuration is environment variables. Only `DATABASE_URL` (or the path in 
 | `REFRESH_INTERVAL` | `0` (off) | re-check registered contracts this often while serving; minimum `1m` |
 | `REFRESH_WEBHOOK_URL` | — | post a JSON message here whenever a refresh finds an upgraded contract |
 | `REFRESH_WEBHOOK_SECRET` | — | sign webhook payloads with HMAC-SHA256 |
+| `REFRESH_EVENTS` | `false` | follow the network's upgrade events and refresh a contract as soon as it is upgraded; needs `REFRESH_INTERVAL` |
+| `REFRESH_EVENTS_INTERVAL` | `10s` | how often new upgrade events are read; minimum `2s` |
+| `SIGNING_KEY` | — | sign interface responses with this Ed25519 key (base64 32-byte seed; or `SIGNING_KEY_FILE`). `sorovault keygen` makes one |
+| `SIGNING_RETIRED_KEYS` | — | comma-separated base64 public keys of earlier signing keys, kept at `GET /api/keys` so old signatures stay verifiable |
 
 `NETWORK_PASSPHRASE` is a guard, not a source of truth. SoroVault reads the real
 passphrase from the RPC endpoint and refuses to proceed if the two disagree, so
@@ -213,6 +217,32 @@ A contract that fails to refresh — expired, or an RPC error — is logged and
 skipped, and the sweep carries on. One sweep runs at startup and then one per
 interval; a sweep in progress at shutdown is cancelled before the database is
 closed.
+
+### Refreshing on upgrade events
+
+Polling finds an upgrade up to a whole interval late, and re-checks every
+contract to find the few that changed. When a contract replaces its code, the
+network emits a `system` event with the topics `executable_update`, the old
+executable and the new one. Set `REFRESH_EVENTS=true` and `serve` follows those
+events through `getEvents`, and refreshes just the registered contracts they
+name, within `REFRESH_EVENTS_INTERVAL` of the upgrade. Events about contracts
+nobody registered cost no RPC work, and a contract upgraded several times
+between two reads is refreshed once.
+
+Polling does not go away: `REFRESH_INTERVAL` is required alongside, and keeps
+sweeping as a slow safety net for whatever an event might miss (a refresh that
+failed, for one).
+
+The position read up to is saved in the database after each page of events, so
+a restart resumes where it stopped. Two things leave no usable position, and
+both are answered with a full sweep instead of a guess:
+
+- the first run, which has no saved position; and
+- a saved position older than the RPC's retention (the RPC keeps about a week
+  of ledgers), because upgrades in the gap can no longer be read.
+
+In both, the position is moved to the newest ledger *before* the sweep starts,
+so an upgrade that lands during the sweep is read by the next poll.
 
 ### Telling the world about an upgrade
 
@@ -250,6 +280,134 @@ X-SoroVault-Signature: sha256=6f3a…
 A receiver recomputes it over the body it received and compares the two in
 constant time. A mismatch means the payload was tampered with, or did not
 come from SoroVault at all.
+
+### Who deployed a contract
+
+On registration SoroVault works out which account created the contract and in
+which ledger, and stores both. They appear in the API (`origin` in
+`GET /api/contracts/{id}`, `creator` and `created_ledger` in listings) and on
+the contract page. When they cannot be determined the API says so
+(`"origin": {"known": false}`) and the page says "Unknown"; a missing creator
+is never shown as an empty one.
+
+The creator is found from the RPC's own history: the instance entry says which
+ledger last modified it, and if that ledger holds a transaction that *created*
+the entry, that transaction's source account (or the operation's, when it has
+its own) is the creator. This has two limits, both deliberate:
+
+- The RPC keeps about a week of ledgers, so a contract older than that cannot
+  be traced.
+- A contract modified since it was created — upgraded, or with instance
+  storage written — has a "last modified" ledger that is no longer its
+  creation. SoroVault reports it as unknown rather than guess, because
+  publisher verification (below) trusts this value.
+
+Horizon, which keeps full history, could answer both cases, but it has no
+lookup by contract; finding a creation there means scanning operations. The
+lookup sits behind `stellar.OriginFinder`, so a Horizon-backed finder can be
+added without touching the registry.
+
+`sorovault backfill-origins` fills in contracts registered before this existed,
+or whose lookup failed. It only looks at contracts still without a creator, so
+it is safe to run repeatedly.
+
+### Verified publishers
+
+Anyone can register a contract and attach a source link, so a listing alone
+does not say who stands behind it. A publisher who controls the account that
+deployed a contract can prove it by signing a claim:
+
+```console
+$ export SOROVAULT_PUBLISHER_SECRET=S…     # the deploying account's secret seed
+$ sorovault claim sign CDZZ…4PAN --name "ZK Vote" \
+    --source-url https://github.com/example/zkvote \
+  | curl -X POST -H 'content-type: application/json' -d @- \
+    https://registry.example/api/contracts/CDZZ…4PAN/verify
+```
+
+`claim sign` signs locally and prints the request body; the seed is read from
+the environment (never a flag) and is never sent anywhere. The signed message is
+`sorovault-claim-v1\n` followed by the [canonical JSON](#signed-attestations) of
+`{v, network, contract_id, name, source_url, source_commit?, wasm_hash?,
+issued_at}`, signed with the account's Ed25519 key, so any Stellar SDK can
+produce it.
+
+The registry accepts a claim when all of these hold, and otherwise refuses it
+with the reason:
+
+| Check | Refusal |
+|---|---|
+| well formed, and for this registry's network | `400` |
+| the signature verifies against the signing account | `400` |
+| issued within the last 15 minutes (and not in the future) | `422` stale |
+| if it pins a `wasm_hash`, the contract still runs that version | `422` stale |
+| the deployer is known | `422` |
+| the signer is the account that created the contract | `403` |
+
+The signature is checked before the registry is consulted, so nobody can probe
+what is registered without a valid signature. The 15-minute window is what stops
+a captured claim being replayed later.
+
+On success the contract is marked verified and takes the claim's name and source.
+The API reports `verified: {publisher, verified_at, wasm_hash, current}`, where
+`current` goes false if the contract is upgraded afterwards (the publisher
+vouched for an earlier version), and the UI shows a badge.
+
+The deployer is the only relationship accepted. A contract's "admin" is a
+convention of each contract, not something the network records, so honouring it
+would mean guessing at storage layouts. A publisher whose deploying account
+differs from the one they sign with can sign with the deployer.
+
+### Signed attestations
+
+A client that trusts SoroVault's decoded interfaces has to trust the transport
+and the server. With a signing key, every interface response says which
+registry produced it, in a way that survives caches and mirrors.
+
+```console
+$ sorovault keygen > signing.key          # seed on stdout; key id and public key on stderr
+$ SIGNING_KEY_FILE=signing.key sorovault serve
+```
+
+`GET /api/contracts/{id}` and `GET /api/wasm/{hash}` then carry two headers:
+
+```
+X-SoroVault-Attestation: <base64 Ed25519 signature>
+X-SoroVault-Key-Id: 65b60673d6ed884b
+```
+
+and `GET /api/keys` publishes the public keys to verify against (the current key
+first, then any in `SIGNING_RETIRED_KEYS`). To rotate: generate a new key, move
+the old public key into `SIGNING_RETIRED_KEYS`, and set `SIGNING_KEY` to the new
+seed; old signatures keep verifying and new responses use the new key.
+
+The signature covers the string `sorovault-attestation-v1\n` followed by the
+canonical JSON of
+
+```json
+{"contract_id": "C…", "interface": { … }, "network": "testnet", "v": 1, "wasm_hash": "…"}
+```
+
+built from the response body the client already has (`contract_id` is left out
+for `/api/wasm/{hash}`), so verifying needs no further request. The canonical
+form is [RFC 8785](https://www.rfc-editor.org/rfc/rfc8785) for the integer-only
+documents SoroVault serves: no whitespace, object keys sorted by UTF-16 code
+unit, strings escaping only `"`, `\` and control characters (`<`, `&` and
+U+2028 are written as themselves), integers as digits. The domain prefix means
+a signature made for an attestation can never be replayed as a publisher claim.
+
+Verifiers: Go has `attest.VerifyResponse`; TypeScript has
+[`clients/typescript/verify.ts`](clients/typescript/verify.ts) (WebCrypto, no
+dependencies). Both are tested against the same fixed vectors in
+[`internal/attest/testdata/vectors.json`](internal/attest/testdata/vectors.json),
+which include the awkward cases (HTML characters, U+2028, astral characters, the
+full `u32` range), so the two implementations cannot silently drift. Pin the
+public key from a channel you trust: verifying against a key fetched from the
+same mirror proves nothing.
+
+An attestation says a registry decoded *this interface from this WASM hash*; it
+does not say the WASM is safe or that the publisher is who they claim — that is
+what verification above is for.
 
 ### Contracts that left the network
 
@@ -313,6 +471,8 @@ the same **503**, with the `Retry-After` header, inline on the page.
 | `GET` | `/api/wasm/{hash}/contracts` | every contract running a given WASM — `?network=`, `?ever=`, `?limit=`, `?offset=` |
 | `GET` | `/api/contracts/{id}` | the decoded ABI — `?network=`, `?wasm_hash=` |
 | `PUT` | `/api/contracts/{id}/source` | attach a `source_url` and optional `source_commit` |
+| `POST` | `/api/contracts/{id}/verify` | verify the publisher with a claim signed by the deploying account |
+| `GET` | `/api/keys` | public keys that verify interface signatures |
 | `GET` | `/api/contracts/{id}/functions/{fn}` | one function in detail |
 | `GET` | `/api/contracts/{id}/client.ts` | typed TypeScript client — `?wasm_hash=`, `?download=1` |
 | `GET` | `/api/openapi.json` | OpenAPI 3.1 description of this API |
@@ -453,6 +613,9 @@ sorovault codegen <contract_id>     # --lang ts|md; -o, --wasm-hash, --package
 sorovault export [file]             # versioned JSON backup (-o)
 sorovault import [file]             # restore a backup (--merge)
 sorovault serve                     # JSON API + browse UI
+sorovault backfill-origins          # find the creator of contracts that lack one (--json)
+sorovault claim sign <contract_id>  # sign a publisher claim (--name, --source-url, ...)
+sorovault keygen                    # make an attestation signing key
 sorovault migrate                   # apply schema migrations
 sorovault doctor                    # check a deployment's health
 ```

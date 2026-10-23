@@ -23,6 +23,7 @@ type Memory struct {
 	contracts map[string]Contract
 	specs     map[string][]Spec
 	wasmSpecs map[string]WasmSpec
+	state     map[string]string
 	nextID    int64
 
 	// now is the clock, swappable so tests can produce deterministic and
@@ -38,6 +39,7 @@ func NewMemory() *Memory {
 		contracts: make(map[string]Contract),
 		specs:     make(map[string][]Spec),
 		wasmSpecs: make(map[string]WasmSpec),
+		state:     make(map[string]string),
 		now:       time.Now,
 	}
 }
@@ -132,6 +134,13 @@ func (m *Memory) Save(ctx context.Context, c Contract, iface *model.Interface) e
 		if c.SourceCommit == "" {
 			c.SourceCommit = existing.SourceCommit
 		}
+		// Saving an interface says nothing about who made the contract or
+		// who vouched for it, so both survive.
+		if c.Creator == "" {
+			c.Creator, c.CreatedLedger = existing.Creator, existing.CreatedLedger
+		}
+		c.VerifiedBy, c.VerifiedWasmHash = existing.VerifiedBy, existing.VerifiedWasmHash
+		c.VerifiedAt = copyMissing(existing.VerifiedAt)
 	} else {
 		c.FirstSeen = now
 	}
@@ -201,6 +210,67 @@ func (m *Memory) UpdateSource(ctx context.Context, network, contractID, sourceUR
 	return nil
 }
 
+// SetOrigin records who created a contract and in which ledger.
+func (m *Memory) SetOrigin(ctx context.Context, network, contractID, creator string, ledger uint32) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	k := key(network, contractID)
+	c, ok := m.contracts[k]
+	if !ok {
+		return fmt.Errorf("%w: contract %s on %s", ErrNotFound, contractID, network)
+	}
+	c.Creator, c.CreatedLedger = creator, ledger
+	m.contracts[k] = c
+	return nil
+}
+
+// SetVerified records an accepted publisher claim.
+func (m *Memory) SetVerified(ctx context.Context, network, contractID, name, sourceURL, sourceCommit string, v Verification) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	k := key(network, contractID)
+	c, ok := m.contracts[k]
+	if !ok {
+		return fmt.Errorf("%w: contract %s on %s", ErrNotFound, contractID, network)
+	}
+	at := v.VerifiedAt.UTC()
+	c.Name, c.SourceURL, c.SourceCommit = name, sourceURL, sourceCommit
+	c.VerifiedBy, c.VerifiedAt, c.VerifiedWasmHash = v.Publisher, &at, v.WasmHash
+	m.contracts[k] = c
+	return nil
+}
+
+// GetState returns a persisted value.
+func (m *Memory) GetState(ctx context.Context, key string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	value, ok := m.state[key]
+	if !ok {
+		return "", fmt.Errorf("%w: state %q", ErrNotFound, key)
+	}
+	return value, nil
+}
+
+// SetState stores a value under key.
+func (m *Memory) SetState(ctx context.Context, key, value string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.state[key] = value
+	return nil
+}
+
 // Delete removes a contract and every interface version stored for it.
 func (m *Memory) Delete(ctx context.Context, network, contractID string) error {
 	if err := ctx.Err(); err != nil {
@@ -234,6 +304,7 @@ func (m *Memory) Export(ctx context.Context) (*Snapshot, error) {
 	for k, c := range m.contracts {
 		cs := ContractSnapshot{Contract: c}
 		cs.Contract.MissingSince = copyMissing(c.MissingSince)
+		cs.Contract.VerifiedAt = copyMissing(c.VerifiedAt)
 		cs.Contract.Matches = nil
 		for _, spec := range m.specs[k] {
 			cloned, err := cloneInterface(spec.Interface)
@@ -276,6 +347,7 @@ func (m *Memory) Import(ctx context.Context, snapshot *Snapshot, merge bool) err
 	prepared := make([]ContractSnapshot, 0, len(snapshot.Contracts))
 	for _, cs := range snapshot.Contracts {
 		cs.Contract.MissingSince = copyMissing(cs.Contract.MissingSince)
+		cs.Contract.VerifiedAt = copyMissing(cs.Contract.VerifiedAt)
 		cs.Contract.Matches = nil
 		for i := range cs.Versions {
 			cloned, err := cloneInterface(cs.Versions[i].Interface)
@@ -366,6 +438,7 @@ func (m *Memory) GetContract(ctx context.Context, network, contractID string) (*
 		return nil, fmt.Errorf("%w: contract %s on %s", ErrNotFound, contractID, network)
 	}
 	c.MissingSince = copyMissing(c.MissingSince)
+	c.VerifiedAt = copyMissing(c.VerifiedAt)
 	return &c, nil
 }
 
@@ -425,6 +498,7 @@ func (m *Memory) Stats(ctx context.Context) (*Stats, error) {
 		if stats.Latest == nil || newerContract(c, *stats.Latest) {
 			latest := c
 			latest.MissingSince = copyMissing(c.MissingSince)
+			latest.VerifiedAt = copyMissing(c.VerifiedAt)
 			stats.Latest = &latest
 		}
 	}
@@ -528,6 +602,7 @@ func (m *Memory) ListContracts(ctx context.Context, f ListFilter) (*ContractPage
 			}
 		}
 		c.MissingSince = copyMissing(c.MissingSince)
+		c.VerifiedAt = copyMissing(c.VerifiedAt)
 		matched = append(matched, c)
 	}
 
@@ -570,6 +645,7 @@ func (m *Memory) ListContractsByWasm(ctx context.Context, f WasmFilter) (*WasmCo
 			}
 		}
 		c.MissingSince = copyMissing(c.MissingSince)
+		c.VerifiedAt = copyMissing(c.VerifiedAt)
 		matched = append(matched, WasmContract{Contract: c, Current: current})
 	}
 

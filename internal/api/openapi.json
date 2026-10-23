@@ -96,7 +96,7 @@
           { "$ref": "#/components/parameters/wasmHash" }
         ],
         "responses": {
-          "200": { "description": "The interface.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ContractInterface" }, "examples": { "zkvote": { "$ref": "#/components/examples/ContractInterface" } } } } },
+          "200": { "description": "The interface. When the registry signs, the response carries `X-SoroVault-Attestation` and `X-SoroVault-Key-Id` headers.", "headers": { "X-SoroVault-Attestation": { "$ref": "#/components/headers/Attestation" }, "X-SoroVault-Key-Id": { "$ref": "#/components/headers/KeyId" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ContractInterface" }, "examples": { "zkvote": { "$ref": "#/components/examples/ContractInterface" } } } } },
           "404": { "$ref": "#/components/responses/NotFound" }
         }
       }
@@ -114,13 +114,39 @@
         }
       }
     },
+    "/api/contracts/{id}/verify": {
+      "post": {
+        "summary": "Verify a contract's publisher with a signed claim",
+        "description": "The caller proves control of the account that deployed the contract by signing a claim (contract, name, source) with its key. The signature is the authentication; no other credential is needed. The registry checks the signature, that the claim is recent (issued within the last 15 minutes) and, if it pins a `wasm_hash`, that the contract still runs that version, and that the signer created the contract. On success the contract is marked verified and takes the claim's name and source. The signed message is `sorovault-claim-v1\\n` followed by the canonical JSON (RFC 8785, sorted keys, no whitespace) of the claim fields plus `\"v\": 1`; `sorovault claim sign` builds and signs one.",
+        "operationId": "verifyPublisher",
+        "parameters": [{ "$ref": "#/components/parameters/id" }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/VerifyRequest" } } } },
+        "responses": {
+          "200": { "description": "The contract, now verified.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Contract" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "403": { "description": "The signature is valid but the signer did not deploy the contract.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "422": { "description": "The claim is stale, or the registry cannot tell who deployed the contract.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/api/keys": {
+      "get": {
+        "summary": "Public keys that verify interface signatures",
+        "description": "Empty unless the registry has a signing key configured. When it does, `GET /api/contracts/{id}` and `GET /api/wasm/{hash}` carry `X-SoroVault-Attestation` and `X-SoroVault-Key-Id` headers; the key id names the entry here to verify against.",
+        "operationId": "getKeys",
+        "responses": {
+          "200": { "description": "The published keys.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Keys" } } } }
+        }
+      }
+    },
     "/api/wasm/{hash}": {
       "get": {
         "summary": "Get a catalogued uploaded WASM interface",
         "operationId": "getWasmSpec",
         "parameters": [{ "$ref": "#/components/parameters/hash" }, { "$ref": "#/components/parameters/network" }],
         "responses": {
-          "200": { "description": "The catalogued interface.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WasmSpec" } } } },
+          "200": { "description": "The catalogued interface.", "headers": { "X-SoroVault-Attestation": { "$ref": "#/components/headers/Attestation" }, "X-SoroVault-Key-Id": { "$ref": "#/components/headers/KeyId" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WasmSpec" } } } },
           "404": { "$ref": "#/components/responses/NotFound" }
         }
       },
@@ -297,6 +323,10 @@
     }
   },
   "components": {
+    "headers": {
+      "Attestation": { "description": "Detached Ed25519 signature, base64, over `sorovault-attestation-v1\\n` followed by the canonical JSON (RFC 8785, sorted keys, no whitespace) of `{\"contract_id\", \"interface\", \"network\", \"v\": 1, \"wasm_hash\"}` built from the response body (`contract_id` is omitted for `/api/wasm/{hash}`). Present only when the registry has a signing key.", "schema": { "type": "string" } },
+      "KeyId": { "description": "Id of the key that signed, as listed at `GET /api/keys`.", "schema": { "type": "string" } }
+    },
     "parameters": {
       "id": { "name": "id", "in": "path", "required": true, "schema": { "$ref": "#/components/schemas/ContractID" } },
       "hash": { "name": "hash", "in": "path", "required": true, "schema": { "$ref": "#/components/schemas/WasmHash" } },
@@ -559,6 +589,11 @@
           "first_seen": { "type": "string", "format": "date-time" },
           "last_refreshed": { "type": "string", "format": "date-time" },
           "missing_since": { "type": "string", "format": "date-time", "description": "When a refresh last found the contract absent from the network. Absent while the contract is live." },
+          "creator": { "type": "string", "description": "The account that created the contract. Absent when it could not be determined." },
+          "created_ledger": { "type": "integer", "description": "The ledger the contract was created in. Absent when it could not be determined." },
+          "verified_by": { "type": "string", "description": "The account whose signed claim verified the publisher. Absent for an unverified contract." },
+          "verified_at": { "type": "string", "format": "date-time" },
+          "verified_wasm_hash": { "$ref": "#/components/schemas/WasmHash" },
           "matches": { "type": "array", "items": { "type": "string" }, "description": "Interface symbols a search query matched. Only present on search results." }
         },
         "required": ["contract_id", "network", "current_wasm_hash", "first_seen", "last_refreshed"]
@@ -619,6 +654,48 @@
         "required": ["source_url"],
         "additionalProperties": false
       },
+      "VerifyRequest": {
+        "type": "object",
+        "properties": {
+          "claim": {
+            "type": "object",
+            "properties": {
+              "network": { "type": "string" },
+              "contract_id": { "$ref": "#/components/schemas/ContractID" },
+              "name": { "type": "string", "maxLength": 100 },
+              "source_url": { "type": "string", "format": "uri" },
+              "source_commit": { "type": "string", "pattern": "^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$" },
+              "wasm_hash": { "$ref": "#/components/schemas/WasmHash" },
+              "issued_at": { "type": "string", "format": "date-time" }
+            },
+            "required": ["network", "contract_id", "name", "source_url", "issued_at"],
+            "additionalProperties": false
+          },
+          "signer": { "type": "string", "description": "Stellar account address (G…) that signed." },
+          "signature": { "type": "string", "description": "Base64 Ed25519 signature of the claim message." }
+        },
+        "required": ["claim", "signer", "signature"],
+        "additionalProperties": false
+      },
+      "Keys": {
+        "type": "object",
+        "properties": {
+          "keys": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": { "type": "string" },
+                "algorithm": { "type": "string", "enum": ["ed25519"] },
+                "public_key": { "type": "string", "description": "32-byte public key, base64." },
+                "current": { "type": "boolean", "description": "True for the key that signs now; false for a retired key kept so older signatures verify." }
+              },
+              "required": ["id", "algorithm", "public_key", "current"]
+            }
+          }
+        },
+        "required": ["keys"]
+      },
       "WasmSpec": {
         "type": "object",
         "properties": {
@@ -667,10 +744,31 @@
           "first_seen": { "type": "string", "format": "date-time" },
           "decoded_at": { "type": "string", "format": "date-time" },
           "missing_since": { "type": "string", "format": "date-time", "description": "When a refresh last found the contract absent from the network. Absent while the contract is live." },
+          "origin": {
+            "type": "object",
+            "description": "Who created the contract. `known` is false when the registry could not determine it, which is usual for contracts older than the RPC's retained history.",
+            "properties": {
+              "known": { "type": "boolean" },
+              "creator": { "type": "string" },
+              "created_ledger": { "type": "integer" }
+            },
+            "required": ["known"]
+          },
+          "verified": {
+            "type": "object",
+            "description": "Present once the publisher has been verified with a signed claim.",
+            "properties": {
+              "publisher": { "type": "string", "description": "The deploying account that signed the claim." },
+              "verified_at": { "type": "string", "format": "date-time" },
+              "wasm_hash": { "$ref": "#/components/schemas/WasmHash" },
+              "current": { "type": "boolean", "description": "False when the contract has been upgraded since the claim was made." }
+            },
+            "required": ["publisher", "verified_at", "wasm_hash", "current"]
+          },
           "current": { "type": "boolean", "description": "False when an older version was requested with wasm_hash." },
           "interface": { "$ref": "#/components/schemas/Interface" }
         },
-        "required": ["contract_id", "network", "wasm_hash", "first_seen", "decoded_at", "current", "interface"]
+        "required": ["contract_id", "network", "wasm_hash", "first_seen", "decoded_at", "origin", "current", "interface"]
       },
       "FunctionDetail": {
         "type": "object",

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/soroworks/sorovault/internal/registry"
+	"github.com/soroworks/sorovault/internal/stellar"
 	"github.com/soroworks/sorovault/internal/store"
 )
 
@@ -44,6 +45,13 @@ type Options struct {
 	Logger *slog.Logger
 	// Now is the clock; tests replace it. Defaults to time.Now.
 	Now func() time.Time
+	// Events, when set, makes the refresher follow the network's
+	// contract-upgrade events and refresh a contract as soon as it is
+	// upgraded. Polling continues alongside as a slow safety net.
+	Events stellar.UpdateFollower
+	// EventsInterval is how often new events are read. Defaults to ten
+	// seconds.
+	EventsInterval time.Duration
 	// Wait pauses between scheduled refreshes. Tests replace it to avoid
 	// sleeping; the default respects context cancellation.
 	Wait func(context.Context, time.Duration) error
@@ -58,6 +66,9 @@ type Refresher struct {
 	log      *slog.Logger
 	now      func() time.Time
 	wait     func(context.Context, time.Duration) error
+
+	events         stellar.UpdateFollower
+	eventsInterval time.Duration
 
 	mu        sync.Mutex
 	lastSweep *SweepRecord
@@ -81,14 +92,20 @@ func New(reg Registry, opts Options) (*Refresher, error) {
 	if wait == nil {
 		wait = waitContext
 	}
+	eventsInterval := opts.EventsInterval
+	if eventsInterval <= 0 {
+		eventsInterval = defaultEventsInterval
+	}
 	return &Refresher{
-		reg:      reg,
-		interval: opts.Interval,
-		timeout:  opts.Timeout,
-		notifier: opts.Notifier,
-		log:      log,
-		now:      now,
-		wait:     wait,
+		events:         opts.Events,
+		eventsInterval: eventsInterval,
+		reg:            reg,
+		interval:       opts.Interval,
+		timeout:        opts.Timeout,
+		notifier:       opts.Notifier,
+		log:            log,
+		now:            now,
+		wait:           wait,
 	}, nil
 }
 
@@ -135,6 +152,19 @@ type Summary struct {
 func (r *Refresher) Run(ctx context.Context) error {
 	ticker := time.NewTicker(r.interval)
 	defer ticker.Stop()
+
+	if r.events != nil {
+		followCtx, stopFollowing := context.WithCancel(ctx)
+		followed := make(chan struct{})
+		go func() {
+			defer close(followed)
+			r.FollowEvents(followCtx)
+		}()
+		defer func() {
+			stopFollowing()
+			<-followed
+		}()
+	}
 
 	for {
 		r.sweepAndLog(ctx)
@@ -237,49 +267,55 @@ func (r *Refresher) sweep(ctx context.Context, all bool) (Summary, error) {
 			}
 		}
 
-		sum.Checked++
-		result, err := r.refreshOne(ctx, contract.ContractID)
-		if err != nil {
-			// A busy registry is not a failure: the contract stays stale
-			// and the next sweep tries again. Failing it would report a
-			// problem where there is none.
-			if errors.Is(err, registry.ErrBusy) {
-				sum.Busy++
-				r.log.DebugContext(ctx, "refresh deferred, registry busy",
-					"contract_id", contract.ContractID, "network", network)
-				continue
-			}
-			sum.Failed++
-			r.log.WarnContext(ctx, "refresh failed",
-				"contract_id", contract.ContractID, "network", network, "error", err)
-			continue
-		}
-
-		if result.Missing {
-			// The contract is gone from the network. That is not a
-			// failure — the registry still knows what it was — but it is
-			// worth saying once, when it happens, rather than on every
-			// sweep for as long as the contract stays away.
-			sum.Missing++
-			if contract.MissingSince == nil {
-				r.log.WarnContext(ctx, "contract no longer on the network",
-					"contract_id", contract.ContractID, "network", network,
-					"missing_since", result.Contract.MissingSince)
-			} else {
-				r.log.DebugContext(ctx, "contract still missing",
-					"contract_id", contract.ContractID, "network", network,
-					"missing_since", contract.MissingSince)
-			}
-			continue
-		}
-
-		if result.Changed {
-			sum.Changed++
-			r.notify(ctx, network, result)
-		}
+		r.refreshContract(ctx, network, contract, &sum)
 	}
 
 	return sum, nil
+}
+
+// refreshContract refreshes one contract and records the outcome in sum:
+// the counters and the log line a sweep and the event follower share.
+func (r *Refresher) refreshContract(ctx context.Context, network string, contract store.Contract, sum *Summary) {
+	sum.Checked++
+	result, err := r.refreshOne(ctx, contract.ContractID)
+	if err != nil {
+		// A busy registry is not a failure: the contract stays stale
+		// and the next sweep tries again. Failing it would report a
+		// problem where there is none.
+		if errors.Is(err, registry.ErrBusy) {
+			sum.Busy++
+			r.log.DebugContext(ctx, "refresh deferred, registry busy",
+				"contract_id", contract.ContractID, "network", network)
+			return
+		}
+		sum.Failed++
+		r.log.WarnContext(ctx, "refresh failed",
+			"contract_id", contract.ContractID, "network", network, "error", err)
+		return
+	}
+
+	if result.Missing {
+		// The contract is gone from the network. That is not a
+		// failure — the registry still knows what it was — but it is
+		// worth saying once, when it happens, rather than on every
+		// sweep for as long as the contract stays away.
+		sum.Missing++
+		if contract.MissingSince == nil {
+			r.log.WarnContext(ctx, "contract no longer on the network",
+				"contract_id", contract.ContractID, "network", network,
+				"missing_since", result.Contract.MissingSince)
+		} else {
+			r.log.DebugContext(ctx, "contract still missing",
+				"contract_id", contract.ContractID, "network", network,
+				"missing_since", contract.MissingSince)
+		}
+		return
+	}
+
+	if result.Changed {
+		sum.Changed++
+		r.notify(ctx, network, result)
+	}
 }
 
 // notify tells the notifier that a contract's interface changed.

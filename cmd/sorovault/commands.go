@@ -420,6 +420,9 @@ func newListCmd() *cobra.Command {
 					if c.MissingSince != nil {
 						status = "missing"
 					}
+					if c.Verified() {
+						status = strings.TrimSpace(status + " verified")
+					}
 					_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
 						c.ContractID, c.Network, truncate(c.CurrentWasmHash, 12),
 						c.LastRefreshed.UTC().Format("2006-01-02 15:04"),
@@ -959,6 +962,7 @@ func printRegisterResult(w io.Writer, r *registry.Result) {
 
 	_, _ = fmt.Fprintf(w, "%s %s on %s\n", r.Contract.ContractID, verb, r.Contract.Network)
 	_, _ = fmt.Fprintf(w, "  wasm hash  %s\n", r.Contract.CurrentWasmHash)
+	printOrigin(w, r.Contract)
 
 	if r.Interface != nil {
 		_, _ = fmt.Fprintf(w, "  functions  %d\n", len(r.Interface.Functions))

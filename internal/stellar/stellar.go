@@ -89,3 +89,73 @@ const (
 func notFoundError(contractID string) error {
 	return fmt.Errorf("%w: %s", ErrContractNotFound, contractID)
 }
+
+// ErrOriginUnknown reports that the network's reachable history does not say
+// who created a contract. The RPC keeps only a recent window of ledgers, so
+// it is the normal answer for an old contract, not a failure.
+var ErrOriginUnknown = errors.New("stellar: contract origin is not in the reachable history")
+
+// Origin is where a contract came from.
+type Origin struct {
+	// Creator is the account that submitted the transaction creating the
+	// contract (the operation's source account when it overrides the
+	// transaction's). For a contract deployed by a factory it is the
+	// account that invoked the factory.
+	Creator string
+	// Ledger is the sequence of the ledger the contract was created in.
+	Ledger uint32
+}
+
+// OriginFinder determines a contract's creator and creation ledger.
+//
+// It is optional: a Fetcher that can also find origins implements it, and
+// callers discover it with a type assertion. FindOrigin returns
+// ErrOriginUnknown when the history it can reach does not say.
+type OriginFinder interface {
+	FindOrigin(ctx context.Context, contractID string) (*Origin, error)
+}
+
+// ErrPositionExpired reports that the position asked of an UpdateFollower is
+// older than the history the network keeps, so upgrades in between were
+// missed and cannot be read back.
+var ErrPositionExpired = errors.New("stellar: position is older than the network's retained history")
+
+// ExecutableUpdate is one contract replacing the code it runs.
+type ExecutableUpdate struct {
+	ContractID  string
+	OldWasmHash string
+	NewWasmHash string
+	// Ledger is the ledger the update happened in.
+	Ledger uint32
+}
+
+// UpdatePosition says where to resume reading upgrade events. A non-empty
+// Cursor wins; otherwise reading starts at StartLedger.
+type UpdatePosition struct {
+	Cursor      string
+	StartLedger uint32
+}
+
+// UpdatePage is one batch of upgrade events.
+type UpdatePage struct {
+	Updates []ExecutableUpdate
+	// Cursor resumes reading after this page. It advances even when no
+	// event matched, so an idle network does not make a reader re-scan.
+	Cursor string
+	// LatestLedger is the newest ledger the network has closed.
+	LatestLedger uint32
+	// More is true when the page was full and there may be more events.
+	More bool
+}
+
+// UpdateFollower reads the system events the network emits when a contract's
+// executable is replaced. It is optional, like OriginFinder.
+type UpdateFollower interface {
+	// LatestLedger returns the newest closed ledger.
+	LatestLedger(ctx context.Context) (uint32, error)
+
+	// ExecutableUpdates returns up to limit upgrade events at or after the
+	// position. It returns ErrPositionExpired when the position is older
+	// than the network's retention.
+	ExecutableUpdates(ctx context.Context, from UpdatePosition, limit int) (*UpdatePage, error)
+}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/soroworks/sorovault/internal/attest"
 	"github.com/soroworks/sorovault/internal/model"
 	"github.com/soroworks/sorovault/internal/refresher"
 	"github.com/soroworks/sorovault/internal/store"
@@ -98,6 +99,12 @@ type contractResponse struct {
 	FirstSeen    time.Time  `json:"first_seen"`
 	DecodedAt    time.Time  `json:"decoded_at"`
 	MissingSince *time.Time `json:"missing_since,omitempty"`
+
+	// Origin says who created the contract. It is always present; Known is
+	// false when the registry could not determine it.
+	Origin originResponse `json:"origin"`
+	// Verified is present once the contract's publisher has been verified.
+	Verified *verifiedResponse `json:"verified,omitempty"`
 
 	// Current is false when an older version was requested explicitly.
 	Current bool `json:"current"`
@@ -232,4 +239,52 @@ func requestLogger(log *slog.Logger) func(http.Handler) http.Handler {
 			next.ServeHTTP(ww, r)
 		})
 	}
+}
+
+// originResponse is a contract's provenance, labelled so a client cannot
+// mistake "not determined" for an empty creator.
+type originResponse struct {
+	Known         bool   `json:"known"`
+	Creator       string `json:"creator,omitempty"`
+	CreatedLedger uint32 `json:"created_ledger,omitempty"`
+}
+
+func originOf(c store.Contract) originResponse {
+	if c.Creator == "" {
+		return originResponse{}
+	}
+	return originResponse{Known: true, Creator: c.Creator, CreatedLedger: c.CreatedLedger}
+}
+
+// verifiedResponse says who vouched for a contract, and for which version.
+type verifiedResponse struct {
+	Publisher  string    `json:"publisher"`
+	VerifiedAt time.Time `json:"verified_at"`
+	WasmHash   string    `json:"wasm_hash"`
+	// Current is false when the contract has been upgraded since the claim
+	// was made, so the publisher vouched for an earlier version.
+	Current bool `json:"current"`
+}
+
+func verifiedOf(c store.Contract) *verifiedResponse {
+	if !c.Verified() {
+		return nil
+	}
+	return &verifiedResponse{
+		Publisher:  c.VerifiedBy,
+		VerifiedAt: c.VerifiedAt.UTC(),
+		WasmHash:   c.VerifiedWasmHash,
+		Current:    c.VerifiedWasmHash == c.CurrentWasmHash,
+	}
+}
+
+// verifyRequest is the body of POST /api/contracts/{id}/verify.
+type verifyRequest struct {
+	Claim     attest.Claim `json:"claim"`
+	Signer    string       `json:"signer"`
+	Signature string       `json:"signature"`
+}
+
+type keysResponse struct {
+	Keys []attest.Key `json:"keys"`
 }

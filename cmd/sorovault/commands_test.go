@@ -7,9 +7,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stellar/go-stellar-sdk/keypair"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/soroworks/sorovault/internal/attest"
 	"github.com/soroworks/sorovault/internal/store"
 )
 
@@ -132,4 +134,70 @@ func TestVersionsCommandTakesOneContract(t *testing.T) {
 	require.Error(t, cmd.Args(cmd, nil), "a contract ID is required")
 	require.Error(t, cmd.Args(cmd, []string{"a", "b"}), "only one contract ID is accepted")
 	require.NoError(t, cmd.Args(cmd, []string{"a"}))
+}
+
+func TestPrintOrigin(t *testing.T) {
+	t.Parallel()
+
+	var out bytes.Buffer
+	printOrigin(&out, store.Contract{})
+	assert.Equal(t, "  creator    unknown\n", out.String())
+
+	out.Reset()
+	at := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+	printOrigin(&out, store.Contract{Creator: "GCREATOR", CreatedLedger: 42, VerifiedBy: "GCREATOR", VerifiedAt: &at})
+	assert.Equal(t, "  creator    GCREATOR (ledger 42)\n  verified   by GCREATOR on 2026-08-07\n", out.String())
+}
+
+func TestClaimSignCommand(t *testing.T) {
+	kp := keypair.MustRandom()
+	t.Setenv(secretEnv, kp.Seed())
+
+	cmd := newClaimCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{
+		"sign", "CDZZXVGUCLBUTE3WDD6TF2NXPTBPOYTVPPBBIZMSPVIQLUG226XJ4PAN",
+		"--network", "testnet", "--name", "Hello", "--source-url", "https://github.com/example/hello",
+		"--issued-at", "2026-08-07T12:00:00Z",
+	})
+	require.NoError(t, cmd.Execute())
+
+	var req struct {
+		Claim     attest.Claim `json:"claim"`
+		Signer    string       `json:"signer"`
+		Signature string       `json:"signature"`
+	}
+	require.NoError(t, json.Unmarshal(out.Bytes(), &req))
+	assert.Equal(t, kp.Address(), req.Signer)
+	assert.Equal(t, "Hello", req.Claim.Name)
+	assert.NoError(t, attest.VerifyClaim(req.Signer, req.Signature, req.Claim), "the output is what the API verifies")
+	assert.NotContains(t, out.String(), kp.Seed(), "the secret must never be printed")
+
+	t.Run("refuses without a secret", func(t *testing.T) {
+		t.Setenv(secretEnv, "")
+		cmd := newClaimCmd()
+		cmd.SetOut(&bytes.Buffer{})
+		cmd.SetErr(&bytes.Buffer{})
+		cmd.SetArgs([]string{"sign", "C", "--network", "testnet", "--name", "n", "--source-url", "https://x.example"})
+		assert.ErrorContains(t, cmd.Execute(), secretEnv)
+	})
+}
+
+func TestKeygenCommand(t *testing.T) {
+	t.Parallel()
+
+	cmd := newKeygenCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	require.NoError(t, cmd.Execute())
+
+	seed, err := attest.ParseSeed(strings.TrimSpace(stdout.String()))
+	require.NoError(t, err)
+	signer, err := attest.NewSigner(seed)
+	require.NoError(t, err)
+	assert.Contains(t, stderr.String(), signer.KeyID())
+	assert.NotContains(t, stderr.String(), strings.TrimSpace(stdout.String()), "the seed goes to stdout only")
 }

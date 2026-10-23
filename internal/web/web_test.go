@@ -707,3 +707,51 @@ func TestHtmxInjectsNoInlineStyle(t *testing.T) {
 	assert.Contains(t, body, `name="htmx-config"`)
 	assert.Contains(t, body, "includeIndicatorStyles")
 }
+
+func TestContractPageShowsDeployerAndVerification(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	h := newHarness(t)
+	h.register(t, idA)
+
+	t.Run("an unknown deployer is labelled unknown", func(t *testing.T) {
+		_, body := h.get(t, "/contracts/"+idA)
+		assert.Contains(t, body, "<dt>Deployer</dt>")
+		assert.Contains(t, body, `<dd class="dim"`)
+		assert.Contains(t, body, ">Unknown</dd>")
+		assert.NotContains(t, body, "Verified")
+	})
+
+	require.NoError(t, h.store.SetOrigin(ctx, "testnet", idA, "GCREATOR", 4242))
+
+	t.Run("a known deployer is shown with its ledger", func(t *testing.T) {
+		_, body := h.get(t, "/contracts/"+idA)
+		assert.Contains(t, body, "GCREATOR")
+		assert.Contains(t, body, "in ledger 4242")
+		assert.NotContains(t, body, ">Unknown</dd>")
+		assert.NotContains(t, body, "<dt>Publisher</dt>")
+	})
+
+	current, err := h.store.GetContract(ctx, "testnet", idA)
+	require.NoError(t, err)
+	require.NoError(t, h.store.SetVerified(ctx, "testnet", idA, "Voting", "https://github.com/example/vote", "",
+		store.Verification{Publisher: "GCREATOR", VerifiedAt: time.Date(2026, 8, 7, 0, 0, 0, 0, time.UTC), WasmHash: current.CurrentWasmHash}))
+
+	t.Run("a verified publisher is badged on the page and in the list", func(t *testing.T) {
+		_, body := h.get(t, "/contracts/"+idA)
+		assert.Contains(t, body, `<span class="badge verified"`)
+		assert.Contains(t, body, "2026-08-07")
+		assert.NotContains(t, body, "for an earlier version")
+
+		_, list := h.get(t, "/")
+		assert.Contains(t, list, `<span class="badge verified"`)
+	})
+
+	t.Run("a verification for an older version says so", func(t *testing.T) {
+		require.NoError(t, h.store.SetVerified(ctx, "testnet", idA, "Voting", "https://github.com/example/vote", "",
+			store.Verification{Publisher: "GCREATOR", VerifiedAt: time.Now(), WasmHash: "0ld"}))
+		_, body := h.get(t, "/contracts/"+idA)
+		assert.Contains(t, body, "for an earlier version")
+	})
+}

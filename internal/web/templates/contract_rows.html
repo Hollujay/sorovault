@@ -18,6 +18,7 @@
         <td>
           <a class="mono" id="contract-{{.ContractID}}" href="/contracts/{{.ContractID}}?network={{.Network}}">{{.ContractID}}</a>
           <button class="copy" type="button" data-copy="#contract-{{.ContractID}}" aria-label="Copy contract ID">{{template "copy_icon"}}</button>
+          {{if .Verified}}<span class="badge verified" title="publisher verified by the deploying account">verified</span>{{end}}
           {{if .MissingSince}}<span class="badge missing" title="not found on the network since {{.MissingSince.UTC.Format "2006-01-02 15:04"}} UTC">missing</span>{{end}}
           {{if .Name}}<div class="name">{{.Name}}</div>{{end}}
           {{if .Matches}}<div class="matches">matches {{range $i, $m := .Matches}}{{if $i}}, {{end}}<code>{{$m}}</code>{{end}}</div>{{end}}

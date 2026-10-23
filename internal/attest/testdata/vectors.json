@@ -1,0 +1,123 @@
+{
+  "description": "Detached Ed25519 signatures over sorovault-attestation-v1\\n + canonical JSON. Key seed is bytes 1..32.",
+  "public_key": "ebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ=",
+  "key_id": "65b60673d6ed884b",
+  "cases": [
+    {
+      "name": "contract interface",
+      "body": {
+        "contract_id": "CDZZXVGUCLBUTE3WDD6TF2NXPTBPOYTVPPBBIZMSPVIQLUG226XJ4PAN",
+        "interface": {
+          "abi_version": "1",
+          "meta": {
+            "rsver": "1.89.0"
+          },
+          "functions": [
+            {
+              "name": "héllo \u003c\u0026\u003e \u2028",
+              "doc": "line\nbreak\ttab \"quoted\" \\ slash",
+              "inputs": [
+                {
+                  "name": "n",
+                  "type": {
+                    "kind": "bytes_n",
+                    "display": "BytesN\u003c32\u003e",
+                    "n": 32
+                  }
+                }
+              ],
+              "outputs": []
+            }
+          ],
+          "types": {
+            "structs": [],
+            "unions": [],
+            "enums": [
+              {
+                "name": "E",
+                "cases": [
+                  {
+                    "name": "A",
+                    "value": 4294967295
+                  }
+                ]
+              }
+            ],
+            "error_enums": []
+          },
+          "events": []
+        },
+        "name": "ignored extra field",
+        "network": "testnet",
+        "wasm_hash": "c618dae264864ccf446a3c7db27da80c7c83e840131242cc2fe9cd32a2a20781"
+      },
+      "canonical": "{\"contract_id\":\"CDZZXVGUCLBUTE3WDD6TF2NXPTBPOYTVPPBBIZMSPVIQLUG226XJ4PAN\",\"interface\":{\"abi_version\":\"1\",\"events\":[],\"functions\":[{\"doc\":\"line\\nbreak\\ttab \\\"quoted\\\" \\\\ slash\",\"inputs\":[{\"name\":\"n\",\"type\":{\"display\":\"BytesN\u003c32\u003e\",\"kind\":\"bytes_n\",\"n\":32}}],\"name\":\"héllo \u003c\u0026\u003e \u2028\",\"outputs\":[]}],\"meta\":{\"rsver\":\"1.89.0\"},\"types\":{\"enums\":[{\"cases\":[{\"name\":\"A\",\"value\":4294967295}],\"name\":\"E\"}],\"error_enums\":[],\"structs\":[],\"unions\":[]}},\"network\":\"testnet\",\"v\":1,\"wasm_hash\":\"c618dae264864ccf446a3c7db27da80c7c83e840131242cc2fe9cd32a2a20781\"}",
+      "signature": "eKtz2GvKwT3cpfQ9kg/5ZEbrbtLrjP7EqRNLqYkfwIyK/0V/yuzL5gp5EDvWUmQOvKbOuSCZVshn9uMzyQwkAQ==",
+      "valid": true
+    },
+    {
+      "name": "wasm interface has no contract id",
+      "body": {
+        "interface": {
+          "abi_version": "1",
+          "meta": {
+            "rsver": "1.89.0"
+          },
+          "functions": [
+            {
+              "name": "héllo \u003c\u0026\u003e \u2028",
+              "doc": "line\nbreak\ttab \"quoted\" \\ slash",
+              "inputs": [
+                {
+                  "name": "n",
+                  "type": {
+                    "kind": "bytes_n",
+                    "display": "BytesN\u003c32\u003e",
+                    "n": 32
+                  }
+                }
+              ],
+              "outputs": []
+            }
+          ],
+          "types": {
+            "structs": [],
+            "unions": [],
+            "enums": [
+              {
+                "name": "E",
+                "cases": [
+                  {
+                    "name": "A",
+                    "value": 4294967295
+                  }
+                ]
+              }
+            ],
+            "error_enums": []
+          },
+          "events": []
+        },
+        "network": "public",
+        "wasm_hash": "c618dae264864ccf446a3c7db27da80c7c83e840131242cc2fe9cd32a2a20781"
+      },
+      "canonical": "{\"interface\":{\"abi_version\":\"1\",\"events\":[],\"functions\":[{\"doc\":\"line\\nbreak\\ttab \\\"quoted\\\" \\\\ slash\",\"inputs\":[{\"name\":\"n\",\"type\":{\"display\":\"BytesN\u003c32\u003e\",\"kind\":\"bytes_n\",\"n\":32}}],\"name\":\"héllo \u003c\u0026\u003e \u2028\",\"outputs\":[]}],\"meta\":{\"rsver\":\"1.89.0\"},\"types\":{\"enums\":[{\"cases\":[{\"name\":\"A\",\"value\":4294967295}],\"name\":\"E\"}],\"error_enums\":[],\"structs\":[],\"unions\":[]}},\"network\":\"public\",\"v\":1,\"wasm_hash\":\"c618dae264864ccf446a3c7db27da80c7c83e840131242cc2fe9cd32a2a20781\"}",
+      "signature": "Y823B/36qJoLosNBFE4R+M0jyA+5VaDSmP7NPvTzwF94wPqaJorHcW6b6pSbePd44Az0PlniFP3A1VrPgACfCg==",
+      "valid": true
+    },
+    {
+      "name": "tampered interface",
+      "body": {
+        "contract_id": "CDZZXVGUCLBUTE3WDD6TF2NXPTBPOYTVPPBBIZMSPVIQLUG226XJ4PAN",
+        "network": "testnet",
+        "wasm_hash": "c618dae264864ccf446a3c7db27da80c7c83e840131242cc2fe9cd32a2a20781",
+        "interface": {
+          "abi_version": "2"
+        }
+      },
+      "canonical": "{\"contract_id\":\"CDZZXVGUCLBUTE3WDD6TF2NXPTBPOYTVPPBBIZMSPVIQLUG226XJ4PAN\",\"interface\":{\"abi_version\":\"1\",\"events\":[],\"functions\":[{\"doc\":\"line\\nbreak\\ttab \\\"quoted\\\" \\\\ slash\",\"inputs\":[{\"name\":\"n\",\"type\":{\"display\":\"BytesN\u003c32\u003e\",\"kind\":\"bytes_n\",\"n\":32}}],\"name\":\"héllo \u003c\u0026\u003e \u2028\",\"outputs\":[]}],\"meta\":{\"rsver\":\"1.89.0\"},\"types\":{\"enums\":[{\"cases\":[{\"name\":\"A\",\"value\":4294967295}],\"name\":\"E\"}],\"error_enums\":[],\"structs\":[],\"unions\":[]}},\"network\":\"testnet\",\"v\":1,\"wasm_hash\":\"c618dae264864ccf446a3c7db27da80c7c83e840131242cc2fe9cd32a2a20781\"}",
+      "signature": "eKtz2GvKwT3cpfQ9kg/5ZEbrbtLrjP7EqRNLqYkfwIyK/0V/yuzL5gp5EDvWUmQOvKbOuSCZVshn9uMzyQwkAQ==",
+      "valid": false
+    }
+  ]
+}

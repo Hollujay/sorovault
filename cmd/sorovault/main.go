@@ -44,7 +44,11 @@ Configuration is read from the environment:
   DATABASE_URL                Postgres connection URL   (required; or DATABASE_URL_FILE)
   MAX_CONCURRENT_REGISTRATIONS registrations at once     (default 4)
   HTTP_ADDR                   listen address for serve  (default :8080)
-  LOG_LEVEL                   debug|info|warn|error     (default info)`,
+  LOG_LEVEL                   debug|info|warn|error     (default info)
+  REFRESH_EVENTS              refresh on upgrade events (default false; needs REFRESH_INTERVAL)
+  REFRESH_EVENTS_INTERVAL     how often to read events  (default 10s)
+  SIGNING_KEY                 sign interface responses  (base64 Ed25519 seed; or SIGNING_KEY_FILE)
+  SIGNING_RETIRED_KEYS        old public keys to publish (comma-separated base64)`,
 		Version:       version,
 		SilenceUsage:  true,
 		SilenceErrors: false,
@@ -63,6 +67,9 @@ Configuration is read from the environment:
 		newServeCmd(),
 		newMigrateCmd(),
 		newDoctorCmd(doctorDepsFromEnv),
+		newBackfillCmd(),
+		newClaimCmd(),
+		newKeygenCmd(),
 	)
 
 	return root

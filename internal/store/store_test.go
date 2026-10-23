@@ -553,6 +553,99 @@ func runStoreSuite(t *testing.T, newStore factory) {
 		assert.Len(t, page.Contracts, 1, "an oversized limit must be clamped, not rejected")
 	})
 
+	t.Run("origin is recorded and survives a save", func(t *testing.T) {
+		s := newStore(t)
+		ctx := context.Background()
+		require.NoError(t, s.Save(ctx, contract(idA, "testnet", "hash1"), iface("a")))
+
+		got, err := s.GetContract(ctx, "testnet", idA)
+		require.NoError(t, err)
+		assert.Empty(t, got.Creator, "an origin nobody recorded is unknown")
+		assert.Zero(t, got.CreatedLedger)
+
+		require.NoError(t, s.SetOrigin(ctx, "testnet", idA, "GDKYNFLCSIELXMVTS6F76CZBEGDPNZ5OSCXRBDP3R3GPPGMJ4Y4CJHCH", 5342891))
+		require.NoError(t, s.Save(ctx, contract(idA, "testnet", "hash2"), iface("b")))
+
+		got, err = s.GetContract(ctx, "testnet", idA)
+		require.NoError(t, err)
+		assert.Equal(t, "GDKYNFLCSIELXMVTS6F76CZBEGDPNZ5OSCXRBDP3R3GPPGMJ4Y4CJHCH", got.Creator)
+		assert.Equal(t, uint32(5342891), got.CreatedLedger, "an upgrade must not forget who deployed the contract")
+
+		assert.ErrorIs(t, s.SetOrigin(ctx, "testnet", idB, "G", 1), store.ErrNotFound)
+	})
+
+	t.Run("verification is recorded, listed and survives a save", func(t *testing.T) {
+		s := newStore(t)
+		ctx := context.Background()
+		require.NoError(t, s.Save(ctx, contract(idA, "testnet", "hash1"), iface("a")))
+		assert.False(t, mustContract(t, s, idA).Verified())
+
+		at := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+		require.NoError(t, s.SetVerified(ctx, "testnet", idA, "ZK Vote", "https://github.com/example/zkvote",
+			"0123456789abcdef0123456789abcdef01234567",
+			store.Verification{Publisher: "GPUBLISHER", VerifiedAt: at, WasmHash: "hash1"}))
+
+		got := mustContract(t, s, idA)
+		assert.True(t, got.Verified())
+		assert.Equal(t, "GPUBLISHER", got.VerifiedBy)
+		assert.Equal(t, "hash1", got.VerifiedWasmHash)
+		assert.True(t, at.Equal(*got.VerifiedAt))
+		assert.Equal(t, "ZK Vote", got.Name)
+		assert.Equal(t, "https://github.com/example/zkvote", got.SourceURL)
+
+		require.NoError(t, s.Save(ctx, contract(idA, "testnet", "hash2"), iface("b")))
+		got = mustContract(t, s, idA)
+		assert.True(t, got.Verified(), "an upgrade keeps the verification, pinned to the version it was made for")
+		assert.Equal(t, "hash1", got.VerifiedWasmHash)
+		assert.Equal(t, "hash2", got.CurrentWasmHash)
+
+		page, err := s.ListContracts(ctx, store.ListFilter{Network: "testnet"})
+		require.NoError(t, err)
+		require.Len(t, page.Contracts, 1)
+		assert.True(t, page.Contracts[0].Verified())
+
+		assert.ErrorIs(t, s.SetVerified(ctx, "testnet", idB, "n", "https://x.example", "", store.Verification{Publisher: "G", VerifiedAt: at}), store.ErrNotFound)
+	})
+
+	t.Run("origin and verification round trip through a snapshot", func(t *testing.T) {
+		src := newStore(t)
+		ctx := context.Background()
+		require.NoError(t, src.Save(ctx, contract(idA, "testnet", "hash1"), iface("a")))
+		require.NoError(t, src.SetOrigin(ctx, "testnet", idA, "GCREATOR", 77))
+		require.NoError(t, src.SetVerified(ctx, "testnet", idA, "N", "https://x.example", "",
+			store.Verification{Publisher: "GCREATOR", VerifiedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), WasmHash: "hash1"}))
+
+		snapshot, err := src.Export(ctx)
+		require.NoError(t, err)
+
+		dst := newStore(t)
+		require.NoError(t, dst.Import(ctx, snapshot, false))
+		got := mustContract(t, dst, idA)
+		assert.Equal(t, "GCREATOR", got.Creator)
+		assert.Equal(t, uint32(77), got.CreatedLedger)
+		assert.Equal(t, "GCREATOR", got.VerifiedBy)
+		assert.Equal(t, "hash1", got.VerifiedWasmHash)
+		require.NotNil(t, got.VerifiedAt)
+	})
+
+	t.Run("state is stored and replaced", func(t *testing.T) {
+		s := newStore(t)
+		ctx := context.Background()
+
+		// State is not part of the per-test reset, so the key is unique to
+		// this run rather than assumed to be absent.
+		k := fmt.Sprintf("test.%d", time.Now().UnixNano())
+
+		_, err := s.GetState(ctx, k)
+		assert.ErrorIs(t, err, store.ErrNotFound)
+
+		require.NoError(t, s.SetState(ctx, k, "one"))
+		require.NoError(t, s.SetState(ctx, k, "two"))
+		got, err := s.GetState(ctx, k)
+		require.NoError(t, err)
+		assert.Equal(t, "two", got)
+	})
+
 	t.Run("saving a nil interface is rejected", func(t *testing.T) {
 		s := newStore(t)
 
@@ -936,4 +1029,11 @@ func TestListFilterNormalize(t *testing.T) {
 			assert.Equal(t, tt.wantQuery, f.Query)
 		})
 	}
+}
+
+func mustContract(t *testing.T, s store.Store, id string) *store.Contract {
+	t.Helper()
+	got, err := s.GetContract(context.Background(), "testnet", id)
+	require.NoError(t, err)
+	return got
 }
