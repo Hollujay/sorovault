@@ -28,6 +28,7 @@ import (
 
 	"github.com/soroworks/sorovault/internal/attest"
 	"github.com/soroworks/sorovault/internal/codegen"
+	"github.com/soroworks/sorovault/internal/model"
 	"github.com/soroworks/sorovault/internal/refresher"
 	"github.com/soroworks/sorovault/internal/registry"
 	"github.com/soroworks/sorovault/internal/spec"
@@ -103,8 +104,10 @@ func (s *Server) Routes() chi.Router {
 	r.Post("/contracts/{id}/refresh", s.refreshContract)
 	r.Get("/contracts/{id}/versions", s.listVersions)
 	r.Get("/contracts/{id}/functions", s.listFunctions)
+	r.Get("/contracts/{id}/events", s.listEvents)
 	r.Get("/contracts/{id}/functions/{fn}", s.getFunction)
 	r.Get("/contracts/{id}/functions/{fn}/schema.json", s.getFunctionSchema)
+	r.Get("/contracts/{id}/functions/{fn}/example.json", s.getFunctionExample)
 	r.Get("/contracts/{id}/client.ts", s.getTypeScriptClient)
 	r.Get("/keys", s.getKeys)
 	r.Get("/stats", s.getStats)
@@ -710,6 +713,52 @@ func (s *Server) getFunctionSchema(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(schema) //nolint:gosec // generated JSON Schema, served as application/schema+json
 }
 
+// getFunctionExample serves GET
+// /api/contracts/{id}/functions/{fn}/example.json: one example argument list
+// for the function.
+//
+// The document is the placeholder argument object the function's JSON Schema
+// validates, so a client can take it, fill in the fields it cares about and
+// send its first request. It is derived from the same stored interface the
+// schema is, which keeps the two from drifting apart.
+func (s *Server) getFunctionExample(w http.ResponseWriter, r *http.Request) {
+	contractID := chi.URLParam(r, "id")
+	fnName := chi.URLParam(r, "fn")
+
+	network, err := s.network(r)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+
+	wasmHash := strings.TrimSpace(r.URL.Query().Get("wasm_hash"))
+	stored, err := s.reg.Store().GetSpec(r.Context(), network, contractID, wasmHash)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+
+	fn, ok := stored.Interface.Function(fnName)
+	if !ok {
+		writeError(w, http.StatusNotFound,
+			"no function "+strconv.Quote(fnName)+" in contract "+contractID)
+		return
+	}
+
+	example, err := codegen.Example(stored.Interface, fn, codegen.Source{
+		ContractID: stored.ContractID,
+		Network:    stored.Network,
+		WasmHash:   stored.WasmHash,
+	})
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(example) //nolint:gosec // generated example, served as application/json
+}
+
 // listFunctions serves GET /api/contracts/{id}/functions.
 func (s *Server) listFunctions(w http.ResponseWriter, r *http.Request) {
 	contractID := chi.URLParam(r, "id")
@@ -740,6 +789,47 @@ func (s *Server) listFunctions(w http.ResponseWriter, r *http.Request) {
 		Network:    stored.Network,
 		WasmHash:   stored.WasmHash,
 		Functions:  functions,
+	})
+}
+
+// listEvents serves GET /api/contracts/{id}/events: the event definitions a
+// contract declares, for the indexers that react to them.
+//
+// An indexer usually wants only the events and not the whole interface, which
+// is one large document. Each event is the definition the interface holds
+// itself — its name, topic names, parameters with their types and whether
+// each is a topic or data, and the data payload's packing — so values here
+// match the ones the interface document serves, `?wasm_hash=` selects a
+// superseded version the same way, and the shapes stay in step by
+// construction.
+func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
+	contractID := chi.URLParam(r, "id")
+
+	network, err := s.network(r)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+
+	wasmHash := strings.TrimSpace(r.URL.Query().Get("wasm_hash"))
+	stored, err := s.reg.Store().GetSpec(r.Context(), network, contractID, wasmHash)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+
+	events := stored.Interface.Events
+	if events == nil {
+		// A contract with no events still answers with an empty list,
+		// the way the interface document answers with [].
+		events = []model.Event{}
+	}
+
+	writeJSON(w, http.StatusOK, eventListResponse{
+		ContractID: stored.ContractID,
+		Network:    stored.Network,
+		WasmHash:   stored.WasmHash,
+		Events:     events,
 	})
 }
 

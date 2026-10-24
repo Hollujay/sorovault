@@ -474,6 +474,8 @@ the same **503**, with the `Retry-After` header, inline on the page.
 | `POST` | `/api/contracts/{id}/verify` | verify the publisher with a claim signed by the deploying account |
 | `GET` | `/api/keys` | public keys that verify interface signatures |
 | `GET` | `/api/contracts/{id}/functions/{fn}` | one function in detail |
+| `GET` | `/api/contracts/{id}/functions/{fn}/example.json` | one example argument list for the function — `?wasm_hash=` |
+| `GET` | `/api/contracts/{id}/events` | the contract's event definitions — `?network=`, `?wasm_hash=` |
 | `GET` | `/api/contracts/{id}/client.ts` | typed TypeScript client — `?wasm_hash=`, `?download=1` |
 | `GET` | `/api/openapi.json` | OpenAPI 3.1 description of this API |
 | `GET` | `/api/contracts/{id}/versions` | every stored interface version |
@@ -486,6 +488,19 @@ the same **503**, with the `Retry-After` header, inline on the page.
 `POST /api/contracts` returns **201** when the contract is new and **200** when
 it was already registered, so it is safe to retry. Passing `?wasm_hash=` to a
 read selects a superseded version instead of the current one.
+
+`GET /api/contracts/{id}/functions/{fn}/example.json` returns an example
+argument list for a call: one deterministic placeholder of each argument's
+type, keyed as the function's JSON Schema spells them, so it validates against
+that schema and can be pasted into a client and edited:
+
+```console
+$ curl -s localhost:8080/api/contracts/CDZZ…4PAN/functions/has_voted/example.json
+{"nullifier":"0000000000000000000000000000000000000000000000000000000000000000"}
+```
+
+`sorovault codegen --lang examples` writes the same examples for every function
+at once, one entry per function name.
 
 **Batches.** `POST /api/contracts:batch` registers up to 20 contracts in one
 request, which is how a tool seeds a whole deployment without making twenty
@@ -609,7 +624,7 @@ sorovault refresh --all             # one sweep over every contract (--json)
 sorovault list                      # -q, --function, --type, --network, --limit, --offset
 sorovault get <contract_id>         # --function, --wasm-hash, --json
 sorovault versions <contract_id>    # --network, --json
-sorovault codegen <contract_id>     # --lang ts|md; -o, --wasm-hash, --package
+sorovault codegen <contract_id>     # --lang ts|md|examples; -o, --wasm-hash, --package
 sorovault export [file]             # versioned JSON backup (-o)
 sorovault import [file]             # restore a backup (--merge)
 sorovault serve                     # JSON API + browse UI
