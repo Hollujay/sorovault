@@ -59,7 +59,7 @@ func (f *RPCFetcher) ExecutableUpdates(ctx context.Context, from UpdatePosition,
 	resp, err := f.client.GetEvents(ctx, req)
 	if err != nil {
 		if isOutOfRange(err) {
-			return nil, fmt.Errorf("%w: %v", ErrPositionExpired, err)
+			return nil, fmt.Errorf("%w: %w", ErrPositionExpired, err)
 		}
 		return nil, fmt.Errorf("stellar: getEvents: %w", err)
 	}
@@ -107,6 +107,9 @@ func parseExecutableUpdate(event protocol.EventInfo) (update ExecutableUpdate, o
 	}
 	if !isWasm {
 		return update, false, nil
+	}
+	if event.Ledger < 0 {
+		return update, false, fmt.Errorf("upgrade event for %s has negative ledger %d", event.ContractID, event.Ledger)
 	}
 
 	return ExecutableUpdate{

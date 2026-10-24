@@ -78,7 +78,7 @@ type PublisherClaim struct {
 func (r *Registry) VerifyPublisher(ctx context.Context, req PublisherClaim) (*store.Contract, error) {
 	claim := req.Claim
 	if err := stellar.ValidateContractID(claim.ContractID); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidClaim, err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidClaim, err)
 	}
 
 	network, err := r.Network(ctx)
@@ -91,7 +91,7 @@ func (r *Registry) VerifyPublisher(ctx context.Context, req PublisherClaim) (*st
 
 	issued, err := claim.IssuedTime()
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidClaim, err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidClaim, err)
 	}
 	now := time.Now().UTC()
 	switch {
@@ -105,7 +105,7 @@ func (r *Registry) VerifyPublisher(ctx context.Context, req PublisherClaim) (*st
 	// The signature is checked before the registry is consulted, so an
 	// unauthenticated caller cannot use this to probe what is registered.
 	if err := attest.VerifyClaim(req.Signer, req.Signature, claim); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidClaim, err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidClaim, err)
 	}
 
 	contract, err := r.store.GetContract(ctx, network, claim.ContractID)

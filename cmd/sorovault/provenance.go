@@ -55,7 +55,7 @@ again later is harmless; it only looks at contracts still lacking an origin.`,
 // secretEnv is where `claim sign` reads the deploying account's secret seed.
 // It is an environment variable, never a flag, so the seed stays out of
 // shell history and the process list.
-const secretEnv = "SOROVAULT_PUBLISHER_SECRET"
+const secretEnv = "SOROVAULT_PUBLISHER_SECRET" //nolint:gosec // the name of an environment variable, not a credential
 
 func newClaimCmd() *cobra.Command {
 	cmd := &cobra.Command{
