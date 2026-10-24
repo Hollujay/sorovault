@@ -102,9 +102,9 @@ the command asks for confirmation before deleting anything.`,
 				}
 
 				if !yes {
-					fmt.Fprintf(cmd.ErrOrStderr(), "Remove %s from %s and all its versions? [y/N] ", contractID, net)
+					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Remove %s from %s and all its versions? [y/N] ", contractID, net)
 					if !confirmed(cmd.InOrStdin()) {
-						fmt.Fprintln(cmd.ErrOrStderr(), "aborted")
+						_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "aborted")
 						return nil
 					}
 				}
@@ -112,7 +112,7 @@ the command asks for confirmation before deleting anything.`,
 				if err := a.registry.Store().Delete(ctx, net, contractID); err != nil {
 					return err
 				}
-				fmt.Fprintf(cmd.OutOrStdout(), "removed %s from %s\n", contractID, net)
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "removed %s from %s\n", contractID, net)
 				return nil
 			})
 		},
@@ -169,7 +169,7 @@ without contacting RPC.`,
 					return writeJSON(cmd.OutOrStdout(), snapshot)
 				}
 
-				file, err := os.Create(path)
+				file, err := os.Create(path) //nolint:gosec // the path is the operator's --output argument
 				if err != nil {
 					return fmt.Errorf("creating %s: %w", path, err)
 				}
@@ -180,7 +180,7 @@ without contacting RPC.`,
 				if err := file.Close(); err != nil {
 					return fmt.Errorf("writing %s: %w", path, err)
 				}
-				fmt.Fprintf(cmd.ErrOrStderr(), "wrote %s (%d contract(s))\n", path, len(snapshot.Contracts))
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "wrote %s (%d contract(s))\n", path, len(snapshot.Contracts))
 				return nil
 			})
 		},
@@ -223,7 +223,7 @@ it works when the network is unavailable.`,
 			if path == "" || path == "-" {
 				data, err = io.ReadAll(cmd.InOrStdin())
 			} else {
-				data, err = os.ReadFile(path)
+				data, err = os.ReadFile(path) //nolint:gosec // the path is the operator's --input argument
 			}
 			if err != nil {
 				return fmt.Errorf("reading snapshot: %w", err)
@@ -238,7 +238,7 @@ it works when the network is unavailable.`,
 				if err := s.Import(ctx, &snapshot, merge); err != nil {
 					return err
 				}
-				fmt.Fprintf(cmd.ErrOrStderr(), "imported %d contract(s)\n", len(snapshot.Contracts))
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "imported %d contract(s)\n", len(snapshot.Contracts))
 				return nil
 			})
 		},
@@ -251,7 +251,7 @@ it works when the network is unavailable.`,
 
 // printSweepSummary writes one line describing a refresh sweep.
 func printSweepSummary(w io.Writer, sum refresher.Summary) {
-	fmt.Fprintf(w, "checked %d, changed %d, missing %d, failed %d, busy %d\n",
+	_, _ = fmt.Fprintf(w, "checked %d, changed %d, missing %d, failed %d, busy %d\n",
 		sum.Checked, sum.Changed, sum.Missing, sum.Failed, sum.Busy)
 }
 
@@ -369,6 +369,7 @@ its hash is known to differ.`,
 
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the full result as JSON")
 	cmd.Flags().BoolVar(&all, "all", false, "run one sweep over every contract on the network")
+	registerContractIDCompletion(cmd, "all")
 	return cmd
 }
 
@@ -502,6 +503,8 @@ can be piped straight into other tooling.`,
 	cmd.Flags().StringVar(&wasmHash, "wasm-hash", "", "show a specific version instead of the current one")
 	cmd.Flags().StringVar(&function, "function", "", "show only this function")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the ABI as JSON")
+	registerContractIDCompletion(cmd)
+	registerNetworkCompletion(cmd)
 	return cmd
 }
 
@@ -549,6 +552,8 @@ read with "get --wasm-hash".`,
 
 	cmd.Flags().StringVar(&network, "network", "", "network to read from (default: the network RPC_URL serves)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the versions as JSON")
+	registerContractIDCompletion(cmd)
+	registerNetworkCompletion(cmd)
 	return cmd
 }
 
@@ -571,18 +576,23 @@ func newCodegenCmd() *cobra.Command {
 The client is generated from what SoroVault already holds, so no network
 access is needed. --wasm-hash generates against a superseded version.
 
-Supported formats are TypeScript (ts) and Markdown (md). With --package the
-output is a complete npm package: the client under src/, a package.json that
-pins @stellar/stellar-sdk and buffer as peer dependencies, a tsconfig.json
-and a README, ready to publish or install from a tarball.`,
+Supported formats are TypeScript (ts), Markdown (md) and example argument
+lists (examples): one example argument object per function, keyed by
+function name. With --package the output is a complete npm package: the
+client under src/, a package.json that pins @stellar/stellar-sdk and buffer
+as peer dependencies, a tsconfig.json and a README, ready to publish or
+install from a tarball.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if lang != "ts" && lang != "typescript" && lang != "md" && lang != "markdown" {
-				return fmt.Errorf("unsupported --lang %q (supported: ts, md)", lang)
+			if lang != "ts" && lang != "typescript" && lang != "md" && lang != "markdown" && lang != "examples" {
+				return fmt.Errorf("unsupported --lang %q (supported: ts, md, examples)", lang)
 			}
 			if asPackage {
 				if lang == "md" || lang == "markdown" {
 					return fmt.Errorf("--package writes a TypeScript package, so --lang md cannot be packaged")
+				}
+				if lang == "examples" {
+					return fmt.Errorf("--package writes a TypeScript package, so --lang examples cannot be packaged")
 				}
 				if strings.TrimSpace(packageName) == "" {
 					return fmt.Errorf("--package needs --name: the npm package name to publish")
@@ -638,9 +648,14 @@ and a README, ready to publish or install from a tarball.`,
 				}
 
 				var source string
-				if lang == "md" || lang == "markdown" {
+				switch lang {
+				case "md", "markdown":
 					source, err = codegen.Markdown(stored.Interface, src)
-				} else {
+				case "examples":
+					var body []byte
+					body, err = codegen.Examples(stored.Interface, src)
+					source = string(body)
+				default:
 					source, err = codegen.TypeScript(stored.Interface, src)
 				}
 				if err != nil {
@@ -662,11 +677,13 @@ and a README, ready to publish or install from a tarball.`,
 
 	cmd.Flags().StringVar(&network, "network", "", "network to read from (default: the network RPC_URL serves)")
 	cmd.Flags().StringVar(&wasmHash, "wasm-hash", "", "generate for a specific version instead of the current one")
-	cmd.Flags().StringVar(&lang, "lang", "ts", "output format (ts or md)")
+	cmd.Flags().StringVar(&lang, "lang", "ts", "output format (ts, md or examples)")
 	cmd.Flags().StringVarP(&output, "output", "o", "", "write to this file, or this directory with --package")
 	cmd.Flags().BoolVar(&asPackage, "package", false, "write a complete npm package instead of one file")
 	cmd.Flags().StringVar(&packageName, "name", "", "npm package name for --package (@scope/name)")
 	cmd.Flags().StringVar(&pkgVersion, "package-version", "", "version for --package (default: derived from the WASM hash)")
+	registerContractIDCompletion(cmd)
+	registerNetworkCompletion(cmd)
 	return cmd
 }
 

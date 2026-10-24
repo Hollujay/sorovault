@@ -61,7 +61,7 @@ func TestGoldenZKVoteSchemas(t *testing.T) {
 	iface := zkvoteInterface(t)
 	dir := filepath.Join("testdata", "zkvote.schemas")
 	if *update {
-		require.NoError(t, os.MkdirAll(dir, 0o755))
+		require.NoError(t, os.MkdirAll(dir, 0o750))
 	}
 
 	for _, fn := range iface.Functions {
@@ -73,10 +73,10 @@ func TestGoldenZKVoteSchemas(t *testing.T) {
 
 			golden := filepath.Join(dir, fn.Name+".json")
 			if *update {
-				require.NoError(t, os.WriteFile(golden, got, 0o644))
+				require.NoError(t, os.WriteFile(golden, got, 0o600))
 				t.Logf("wrote %s", golden)
 			}
-			want, err := os.ReadFile(golden)
+			want, err := os.ReadFile(golden) //nolint:gosec // test-owned golden path
 			require.NoError(t, err, "golden schema missing; regenerate with -update")
 			assert.Equal(t, string(want), string(got),
 				"generated schema changed; if intended, rerun with -update")

@@ -13,9 +13,9 @@ import (
 	"github.com/soroworks/sorovault/internal/wasm/wasmtest"
 )
 
-// sentinel is an error no part of SoroVault produces, so a test can prove an
+// errSentinel is an error no part of SoroVault produces, so a test can prove an
 // error passed straight through rather than being wrapped or swallowed.
-var sentinel = errors.New("refresh exploded")
+var errSentinel = errors.New("refresh exploded")
 
 // currentInterface returns the name of the first function in the contract's
 // current stored interface, or "" when there is none.
@@ -55,10 +55,10 @@ func TestRefreshWasmHashFailureLeavesContractUnchanged(t *testing.T) {
 	require.NoError(t, err)
 
 	// The hash lookup itself fails, before any module is downloaded.
-	fake.HashErr = sentinel
+	fake.HashErr = errSentinel
 
 	_, err = reg.Refresh(context.Background(), idA)
-	require.ErrorIs(t, err, sentinel)
+	require.ErrorIs(t, err, errSentinel)
 
 	// The stored contract and interface are untouched.
 	got, err := db.GetContract(context.Background(), "testnet", idA)
@@ -80,10 +80,10 @@ func TestRefreshFetchFailureAfterHashChangeLeavesContractUnchanged(t *testing.T)
 	fake.Upgrade(idA, moduleWith(t, "v2"))
 
 	// The download fails after the hash changed.
-	fake.FetchErr = sentinel
+	fake.FetchErr = errSentinel
 
 	_, err = reg.Refresh(context.Background(), idA)
-	require.ErrorIs(t, err, sentinel)
+	require.ErrorIs(t, err, errSentinel)
 
 	// The failed half-upgrade must not clobber the old interface.
 	got, err := db.GetContract(context.Background(), "testnet", idA)

@@ -314,6 +314,8 @@ the same **503**, with the `Retry-After` header, inline on the page.
 | `GET` | `/api/contracts/{id}` | the decoded ABI — `?network=`, `?wasm_hash=` |
 | `PUT` | `/api/contracts/{id}/source` | attach a `source_url` and optional `source_commit` |
 | `GET` | `/api/contracts/{id}/functions/{fn}` | one function in detail |
+| `GET` | `/api/contracts/{id}/functions/{fn}/example.json` | one example argument list for the function — `?wasm_hash=` |
+| `GET` | `/api/contracts/{id}/events` | the contract's event definitions — `?network=`, `?wasm_hash=` |
 | `GET` | `/api/contracts/{id}/client.ts` | typed TypeScript client — `?wasm_hash=`, `?download=1` |
 | `GET` | `/api/openapi.json` | OpenAPI 3.1 description of this API |
 | `GET` | `/api/contracts/{id}/versions` | every stored interface version |
@@ -326,6 +328,19 @@ the same **503**, with the `Retry-After` header, inline on the page.
 `POST /api/contracts` returns **201** when the contract is new and **200** when
 it was already registered, so it is safe to retry. Passing `?wasm_hash=` to a
 read selects a superseded version instead of the current one.
+
+`GET /api/contracts/{id}/functions/{fn}/example.json` returns an example
+argument list for a call: one deterministic placeholder of each argument's
+type, keyed as the function's JSON Schema spells them, so it validates against
+that schema and can be pasted into a client and edited:
+
+```console
+$ curl -s localhost:8080/api/contracts/CDZZ…4PAN/functions/has_voted/example.json
+{"nullifier":"0000000000000000000000000000000000000000000000000000000000000000"}
+```
+
+`sorovault codegen --lang examples` writes the same examples for every function
+at once, one entry per function name.
 
 **Batches.** `POST /api/contracts:batch` registers up to 20 contracts in one
 request, which is how a tool seeds a whole deployment without making twenty
@@ -449,7 +464,7 @@ sorovault refresh --all             # one sweep over every contract (--json)
 sorovault list                      # -q, --function, --type, --network, --limit, --offset
 sorovault get <contract_id>         # --function, --wasm-hash, --json
 sorovault versions <contract_id>    # --network, --json
-sorovault codegen <contract_id>     # --lang ts|md; -o, --wasm-hash, --package
+sorovault codegen <contract_id>     # --lang ts|md|examples; -o, --wasm-hash, --package
 sorovault export [file]             # versioned JSON backup (-o)
 sorovault import [file]             # restore a backup (--merge)
 sorovault serve                     # JSON API + browse UI
@@ -518,6 +533,37 @@ never writes to the database, applies a migration, or changes anything on
 the network. It reads the same configuration as everything else, so a
 deployment missing its `DATABASE_URL` is reported as a configuration error
 rather than a passing check.
+
+### Shell completion
+
+`sorovault completion bash|zsh|fish|powershell` prints a completion script (this
+is Cobra's built-in command; run it once per shell). Then `Tab` completes the
+arguments that are otherwise awkward to type:
+
+```console
+$ sorovault get <Tab>
+CDZZXVGUCLBUTE3WDD6TF2NXPTBPOYTVPPBBIZMSPVIQLUG226XJ4PAN  zkvote
+CBQZ…
+
+$ sorovault get CDZZ --network <Tab>
+testnet  futurenet  mainnet
+```
+
+`get`, `versions`, `refresh` and `codegen` complete contract IDs from the
+registry, and `--network` completes the network names. Named contracts carry
+their name as a description, so the candidate is readable rather than a column
+of 56-character identifiers.
+
+Two rules shape the behaviour, because completion runs inside the user's shell
+prompt on every `Tab`:
+
+- **It never fails noisily.** A database that is down produces no candidates
+  and no error, rather than text pasted into the command line.
+- **It is bounded.** The lookup is capped at a fraction of a second and at 200
+  candidates, so a slow database or a large registry cannot hold the prompt.
+
+Completion reads the registry only; it never contacts the network. `refresh`
+takes contract IDs or `--all`, so it offers no IDs once `--all` is set.
 
 ## Typed clients
 

@@ -129,6 +129,13 @@ type functionSummary struct {
 	Signature string `json:"signature"`
 }
 
+type eventListResponse struct {
+	ContractID string        `json:"contract_id"`
+	Network    string        `json:"network"`
+	WasmHash   string        `json:"wasm_hash"`
+	Events     []model.Event `json:"events"`
+}
+
 type versionsResponse struct {
 	ContractID string              `json:"contract_id"`
 	Network    string              `json:"network"`
