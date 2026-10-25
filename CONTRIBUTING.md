@@ -1,4 +1,4 @@
-# Contributing to SoroVault
+#Contributing to SoroVault
 
 Thanks for taking a look. SoroVault is a small, deliberately unfinished
 codebase — the core is solid and the interesting work is mostly above it. This
