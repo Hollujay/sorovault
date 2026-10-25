@@ -71,8 +71,9 @@ func postgresFactory(t *testing.T, url string) factory {
 
 	return func(t *testing.T) store.Store {
 		// Truncating rather than recreating keeps setup cheap; the cascade
-		// clears specs along with contracts.
-		_, err := pool.Exec(context.Background(), "TRUNCATE contracts CASCADE")
+		// clears specs along with contracts. Subscriptions stand alone, so
+		// they are named too.
+		_, err := pool.Exec(context.Background(), "TRUNCATE contracts, subscriptions CASCADE")
 		require.NoError(t, err)
 
 		return store.NewPostgresFromPool(pool)
