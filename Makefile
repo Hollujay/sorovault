@@ -52,6 +52,10 @@ GOLANGCI_LINT         := go run github.com/golangci/golangci-lint/v2/cmd/golangc
 lint: ## Run the pinned golangci-lint
 	$(GOLANGCI_LINT) run
 
+.PHONY: test-live
+test-live: ## Run the opt-in live smoke test against testnet (requires SOROVAULT_LIVE=1)
+	@go test -run TestLiveSmokeTest -v ./internal/stellar...
+
 .PHONY: check
 check: lint test ## Lint and test — run before opening a PR
 

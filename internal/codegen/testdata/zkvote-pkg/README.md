@@ -15,6 +15,9 @@ npm install zkvote-client
 `@stellar/stellar-sdk` and `buffer` are peer dependencies, so the package
 uses the SDK version your project already depends on.
 
+The schemas this package ships are Zod schemas, so `zod` is a peer
+dependency as well.
+
 ## Use
 
 ```ts

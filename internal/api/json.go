@@ -86,13 +86,19 @@ type listResponse struct {
 	Total     int              `json:"total"`
 	Limit     int              `json:"limit"`
 	Offset    int              `json:"offset"`
+	// Next is the cursor of the following page. Empty means the listing
+	// reached its end on this page.
+	Next string `json:"next,omitempty"`
 }
 
 type contractResponse struct {
 	ContractID   string     `json:"contract_id"`
 	Network      string     `json:"network"`
-	WasmHash     string     `json:"wasm_hash"`
+	WasmHash     string     `json:"wasm_hash,omitempty"`
+	InterfaceID  string     `json:"interface_id,omitempty"`
+	Builtin      bool       `json:"builtin,omitempty"`
 	Name         string     `json:"name,omitempty"`
+	Implements   []string   `json:"implements"`
 	SourceURL    string     `json:"source_url,omitempty"`
 	SourceCommit string     `json:"source_commit,omitempty"`
 	FirstSeen    time.Time  `json:"first_seen"`
@@ -106,9 +112,11 @@ type contractResponse struct {
 }
 
 type functionResponse struct {
-	ContractID string `json:"contract_id"`
-	Network    string `json:"network"`
-	WasmHash   string `json:"wasm_hash"`
+	ContractID  string `json:"contract_id"`
+	Network     string `json:"network"`
+	WasmHash    string `json:"wasm_hash,omitempty"`
+	InterfaceID string `json:"interface_id,omitempty"`
+	Builtin     bool   `json:"builtin,omitempty"`
 
 	// Signature is the function rendered as a one-line Rust-like
 	// declaration, for display and logging.
@@ -118,10 +126,12 @@ type functionResponse struct {
 }
 
 type functionListResponse struct {
-	ContractID string            `json:"contract_id"`
-	Network    string            `json:"network"`
-	WasmHash   string            `json:"wasm_hash"`
-	Functions  []functionSummary `json:"functions"`
+	ContractID  string            `json:"contract_id"`
+	Network     string            `json:"network"`
+	WasmHash    string            `json:"wasm_hash,omitempty"`
+	InterfaceID string            `json:"interface_id,omitempty"`
+	Builtin     bool              `json:"builtin,omitempty"`
+	Functions   []functionSummary `json:"functions"`
 }
 
 type functionSummary struct {

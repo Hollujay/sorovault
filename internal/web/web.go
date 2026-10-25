@@ -9,6 +9,7 @@ package web
 import (
 	"embed"
 	"errors"
+	"fmt"
 	"html/template"
 	"log/slog"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/soroworks/sorovault/internal/api"
 	"github.com/soroworks/sorovault/internal/model"
 	"github.com/soroworks/sorovault/internal/registry"
 	"github.com/soroworks/sorovault/internal/spec"
@@ -35,6 +37,7 @@ type Server struct {
 	reg       *registry.Registry
 	log       *slog.Logger
 	templates *template.Template
+	publicURL string
 }
 
 const contractsPerPage = 100
@@ -55,11 +58,18 @@ func NewServer(reg *registry.Registry, log *slog.Logger) (*Server, error) {
 }
 
 // Routes returns the UI's routes, to be mounted at the server root.
+// SetPublicURL enables absolute canonical links and the sitemap.
+func (s *Server) SetPublicURL(base string) {
+	s.publicURL = strings.TrimRight(base, "/")
+}
+
 func (s *Server) Routes() chi.Router {
 	r := chi.NewRouter()
 	r.Use(securityHeaders)
 
 	r.Get("/", s.index)
+	r.Get("/sitemap.xml", s.sitemap)
+	r.Get("/sitemap-{page}.xml", s.sitemapPage)
 	r.Post("/contracts", s.register)
 	r.Get("/contracts/{id}", s.contract)
 	r.Get("/partials/contracts", s.contractRows)
@@ -339,13 +349,36 @@ func (s *Server) contract(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	metaTitle := "Contract " + contract.ContractID + " · SoroVault"
+	count := 0
+	var names []string
+	if stored.Interface != nil {
+		count = len(stored.Interface.Functions)
+		for _, fn := range stored.Interface.Functions {
+			if len(names) == 5 {
+				break
+			}
+			names = append(names, fn.Name)
+		}
+	}
+	metaDescription := fmt.Sprintf("%s Soroban contract with %d functions", contract.Network, count)
+	if len(names) > 0 {
+		metaDescription += ": " + strings.Join(names, ", ")
+	}
+	metaURL := ""
+	if s.publicURL != "" {
+		metaURL = s.publicURL + "/contracts/" + url.PathEscape(contract.ContractID) + "?network=" + url.QueryEscape(contract.Network)
+	}
 	s.render(w, r, "contract.html", contractData{
-		Contract:  *contract,
-		Spec:      *stored,
-		Versions:  versions,
-		Interface: stored.Interface,
-		IsCurrent: stored.WasmHash == contract.CurrentWasmHash,
-		Networks:  contractNetworks,
+		MetaTitle:       metaTitle,
+		MetaDescription: metaDescription,
+		MetaURL:         metaURL,
+		Contract:        *contract,
+		Spec:            *stored,
+		Versions:        versions,
+		Interface:       stored.Interface,
+		IsCurrent:       stored.WasmHash == contract.CurrentWasmHash,
+		Networks:        contractNetworks,
 	})
 }
 
@@ -410,12 +443,15 @@ type registerData struct {
 }
 
 type contractData struct {
-	Contract  store.Contract
-	Spec      store.Spec
-	Versions  []store.SpecVersion
-	Interface *model.Interface
-	IsCurrent bool
-	Networks  []string
+	MetaTitle       string
+	MetaDescription string
+	MetaURL         string
+	Contract        store.Contract
+	Spec            store.Spec
+	Versions        []store.SpecVersion
+	Interface       *model.Interface
+	IsCurrent       bool
+	Networks        []string
 }
 
 // render writes a template, buffering it first so that a failure midway
@@ -511,6 +547,10 @@ func funcs() template.FuncMap {
 			}
 			return s[:n] + "…"
 		},
+		// abiFilename is the API's own rule for naming a downloaded
+		// interface, so the page cannot promise a file name the response
+		// header does not use.
+		"abiFilename": api.ABIFilename,
 		"hasTypes": func(t model.Types) bool {
 			return len(t.Structs)+len(t.Unions)+len(t.Enums)+len(t.ErrorEnums) > 0
 		},

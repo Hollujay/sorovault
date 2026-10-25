@@ -14,7 +14,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -37,9 +39,10 @@ import (
 
 // Server holds the API's dependencies.
 type Server struct {
-	reg   *registry.Registry
-	log   *slog.Logger
-	cache *interfaceCache
+	reg       *registry.Registry
+	log       *slog.Logger
+	cache     *interfaceCache
+	rateLimit *clientLimiter
 
 	// lastSweep, when set, reports the most recent automatic refresh
 	// sweep. It is nil when refresh is disabled, and GET /api/stats then
@@ -68,14 +71,15 @@ func (s *Server) Routes() chi.Router {
 	r.Use(compressResponses("application/json", "text/plain"))
 
 	r.Get("/contracts", s.listContracts)
-	r.Post("/contracts", s.registerContract)
+	r.Post("/contracts", s.rateLimited(s.registerContract))
 	r.Post("/contracts:batch", s.batchRegisterContracts)
+	r.Post("/decode", s.rateLimited(s.decodeWasm))
 	r.Get("/wasm/{hash}", s.getWasmSpec)
 	r.Post("/wasm/{hash}", s.catalogWasm)
 	r.Get("/wasm/{hash}/contracts", s.listWasmContracts)
 	r.Get("/contracts/{id}", s.getContract)
 	r.Put("/contracts/{id}/source", s.updateContractSource)
-	r.Post("/contracts/{id}/refresh", s.refreshContract)
+	r.Post("/contracts/{id}/refresh", s.rateLimited(s.refreshContract))
 	r.Get("/contracts/{id}/versions", s.listVersions)
 	r.Get("/contracts/{id}/functions", s.listFunctions)
 	r.Get("/contracts/{id}/events", s.listEvents)
@@ -184,6 +188,126 @@ func (s *Server) catalogWasm(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status, result)
 }
 
+// maxDecodeBody caps an uploaded module at 512 KiB — four times the 128 KiB
+// the network allows as contract code, so any module that could ever run on
+// chain fits. It stays deliberately small because this is the only endpoint
+// that reads an arbitrary blob, and each concurrent upload is held in full:
+// until per-client rate limiting exists, the body limit is what bounds
+// memory under a flood of requests.
+const maxDecodeBody = 512 << 10
+
+// errDecodeTooLarge reports an upload beyond maxDecodeBody, so the handler
+// can answer 413 instead of the 400 every other malformed body earns.
+var errDecodeTooLarge = fmt.Errorf("request body exceeds the %d-byte limit", maxDecodeBody)
+
+// decodeWasm serves POST /api/decode: it decodes an uploaded WASM module
+// and returns its interface, without storing anything. The endpoint touches
+// neither the network nor the database, and reuses spec.XDRDecoder — the
+// same decoder every other path goes through, so its limits apply here
+// unchanged.
+//
+// The body is either the raw module, whatever the content type, or a
+// multipart/form-data upload whose first file part carries it. ?format=ts
+// answers with the TypeScript client for the interface instead of the ABI
+// JSON.
+func (s *Server) decodeWasm(w http.ResponseWriter, r *http.Request) {
+	format := r.URL.Query().Get("format")
+	if format != "" && format != "json" && format != "ts" {
+		writeError(w, http.StatusBadRequest, "format must be \"json\" or \"ts\"")
+		return
+	}
+
+	module, err := readWasmBody(r, maxDecodeBody)
+	switch {
+	case errors.Is(err, errDecodeTooLarge):
+		writeError(w, http.StatusRequestEntityTooLarge, err.Error())
+		return
+	case err != nil:
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Every decoder failure is a property of the upload — an unparseable
+	// module, a missing spec section, an entry stream that does not
+	// convert — never a server fault, so none of it becomes a 500.
+	var decoder spec.XDRDecoder
+	iface, err := decoder.Decode(module)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+
+	if format == "ts" {
+		// There is no contract ID or network yet — the module is not
+		// deployed — so only the hash, derived from the bytes at hand,
+		// identifies the interface version the client was built from.
+		sum := sha256.Sum256(module)
+		source, err := codegen.TypeScript(iface, codegen.Source{
+			WasmHash: hex.EncodeToString(sum[:]),
+		})
+		if err != nil {
+			writeError(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write([]byte(source))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, iface)
+}
+
+// readWasmBody reads the uploaded module from r: a raw body, or the first
+// file part of a multipart/form-data upload. It rejects an empty body and
+// anything larger than limit, which is enforced as the bytes arrive, so an
+// oversized upload is never held in full.
+func readWasmBody(r *http.Request, limit int) ([]byte, error) {
+	var body io.Reader = r.Body
+
+	if mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err == nil && mediaType == "multipart/form-data" {
+		file, err := multipartWasmFile(r)
+		if err != nil {
+			return nil, err
+		}
+		body = file
+	}
+
+	module, err := io.ReadAll(io.LimitReader(body, int64(limit)+1))
+	if err != nil {
+		return nil, fmt.Errorf("reading request body: %w", err)
+	}
+	if len(module) > limit {
+		return nil, errDecodeTooLarge
+	}
+	if len(module) == 0 {
+		return nil, errors.New("request body is empty")
+	}
+	return module, nil
+}
+
+// multipartWasmFile returns the first file part of a multipart upload — the
+// part a browser or curl calls a file. Plain fields are skipped, so a form
+// carrying no file is refused rather than decoded as if its field names
+// were a WASM module.
+func multipartWasmFile(r *http.Request) (io.Reader, error) {
+	mr, err := r.MultipartReader()
+	if err != nil {
+		return nil, fmt.Errorf("invalid multipart body: %w", err)
+	}
+	for {
+		part, err := mr.NextPart()
+		if errors.Is(err, io.EOF) {
+			return nil, errors.New("multipart body contains no file part")
+		}
+		if err != nil {
+			return nil, fmt.Errorf("invalid multipart body: %w", err)
+		}
+		if part.FileName() != "" {
+			return part, nil
+		}
+	}
+}
+
 func (s *Server) updateContractSource(w http.ResponseWriter, r *http.Request) {
 	var req sourceRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -254,6 +378,7 @@ func (s *Server) getTypeScriptClient(w http.ResponseWriter, r *http.Request) {
 		ContractID: stored.ContractID,
 		Network:    stored.Network,
 		WasmHash:   stored.WasmHash,
+		WithZod:    r.URL.Query().Get("zod") != "",
 	})
 	if err != nil {
 		// The interface decoded, but cannot be expressed as TypeScript —
@@ -387,9 +512,22 @@ func copyHeader(dst, src http.Header) {
 func Middleware(log *slog.Logger) []func(http.Handler) http.Handler {
 	return []func(http.Handler) http.Handler{
 		middleware.RequestID,
+		requestIDHeader,
 		middleware.Recoverer,
 		requestLogger(log),
 	}
+}
+
+// requestIDHeader copies the request ID onto the response, so a client can
+// quote it when reporting a problem. The ID itself is assigned by
+// middleware.RequestID.
+func requestIDHeader(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if id := middleware.GetReqID(r.Context()); id != "" {
+			w.Header().Set(middleware.RequestIDHeader, id)
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // getStats serves GET /api/stats.
@@ -446,18 +584,32 @@ func (s *Server) listUpgrades(w http.ResponseWriter, r *http.Request) {
 }
 
 // listContracts serves GET /api/contracts.
+//
+// Paging is either by cursor or by the deprecated offset. A cursor names the
+// last row of the previous page, so rows added while a client pages through
+// the listing are seen exactly once — which is the property offsets lose.
 func (s *Server) listContracts(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+
+	cursor := q.Get("cursor")
+	offset := intParam(q.Get("offset"), 0)
+	if cursor != "" && offset != 0 {
+		writeError(w, http.StatusBadRequest,
+			"give a cursor or an offset, not both; offset is deprecated, so prefer the cursor")
+		return
+	}
 
 	filter := store.ListFilter{
 		Network: q.Get("network"),
 		Query:   q.Get("q"),
 		// The exact-name filters are repeatable, and every one of them has
 		// to match.
-		Functions: q["function"],
-		Types:     q["type"],
-		Limit:     intParam(q.Get("limit"), 0),
-		Offset:    intParam(q.Get("offset"), 0),
+		Functions:  q["function"],
+		Types:      q["type"],
+		Implements: q["implements"],
+		Limit:      intParam(q.Get("limit"), 0),
+		Offset:     offset,
+		Cursor:     cursor,
 	}
 	filter.Normalize()
 
@@ -472,13 +624,15 @@ func (s *Server) listContracts(w http.ResponseWriter, r *http.Request) {
 		Total:     page.Total,
 		Limit:     filter.Limit,
 		Offset:    filter.Offset,
+		Next:      page.Next,
 	})
 }
 
 // getContract serves GET /api/contracts/{id}, returning the decoded ABI.
 //
 // The optional wasm_hash parameter selects a superseded version; without it
-// the contract's current interface is returned.
+// the contract's current interface is returned. ?download=1 asks the browser
+// to save the document under a name of its own rather than display it.
 func (s *Server) getContract(w http.ResponseWriter, r *http.Request) {
 	contractID := chi.URLParam(r, "id")
 
@@ -517,11 +671,26 @@ func (s *Server) getContract(w http.ResponseWriter, r *http.Request) {
 		s.cache.add(key, cached)
 	}
 
+	// The header has to be set before the body is written.
+	if r.URL.Query().Get("download") != "" {
+		w.Header().Set("Content-Disposition", `attachment; filename="`+ABIFilename(contractID, cacheHash)+`"`)
+	}
+
+	builtin := cacheHash == stellar.BuiltinSACIdentifier
+	responseHash := cacheHash
+	interfaceID := ""
+	if builtin {
+		responseHash = ""
+		interfaceID = stellar.BuiltinSACIdentifier
+	}
 	writeJSON(w, http.StatusOK, contractResponse{
 		ContractID:   contract.ContractID,
 		Network:      contract.Network,
-		WasmHash:     cacheHash,
+		WasmHash:     responseHash,
+		InterfaceID:  interfaceID,
+		Builtin:      builtin,
 		Name:         contract.Name,
+		Implements:   contract.Implements,
 		SourceURL:    contract.SourceURL,
 		SourceCommit: contract.SourceCommit,
 		FirstSeen:    contract.FirstSeen.UTC(),
@@ -530,6 +699,26 @@ func (s *Server) getContract(w http.ResponseWriter, r *http.Request) {
 		Current:      cacheHash == contract.CurrentWasmHash,
 		Interface:    json.RawMessage(cached.body),
 	})
+}
+
+// ABIFilename names the file a downloaded interface is saved as: the contract
+// it belongs to, and the short form of the WASM hash it was decoded from, so
+// two versions of one contract do not collide.
+//
+// The browse page names the file the same way, so the two cannot disagree
+// about what a download will be called.
+func ABIFilename(contractID, wasmHash string) string {
+	return contractID + "." + shortHash(wasmHash) + ".abi.json"
+}
+
+// shortHash is the head of a WASM hash: enough to tell two versions of a
+// contract apart, short enough for a filename.
+func shortHash(hash string) string {
+	const n = 12
+	if len(hash) <= n {
+		return hash
+	}
+	return hash[:n]
 }
 
 // getFunction serves GET /api/contracts/{id}/functions/{fn}.
@@ -557,12 +746,19 @@ func (s *Server) getFunction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	wasmHash, interfaceID := stored.WasmHash, ""
+	if stored.Interface.Builtin {
+		wasmHash = ""
+		interfaceID = stored.WasmHash
+	}
 	writeJSON(w, http.StatusOK, functionResponse{
-		ContractID: stored.ContractID,
-		Network:    stored.Network,
-		WasmHash:   stored.WasmHash,
-		Signature:  fn.Signature(),
-		Function:   fn,
+		ContractID:  stored.ContractID,
+		Network:     stored.Network,
+		WasmHash:    wasmHash,
+		InterfaceID: interfaceID,
+		Builtin:     stored.Interface.Builtin,
+		Signature:   fn.Signature(),
+		Function:    fn,
 	})
 }
 
@@ -683,11 +879,18 @@ func (s *Server) listFunctions(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	wasmHash, interfaceID := stored.WasmHash, ""
+	if stored.Interface.Builtin {
+		wasmHash = ""
+		interfaceID = stored.WasmHash
+	}
 	writeJSON(w, http.StatusOK, functionListResponse{
-		ContractID: stored.ContractID,
-		Network:    stored.Network,
-		WasmHash:   stored.WasmHash,
-		Functions:  functions,
+		ContractID:  stored.ContractID,
+		Network:     stored.Network,
+		WasmHash:    wasmHash,
+		InterfaceID: interfaceID,
+		Builtin:     stored.Interface.Builtin,
+		Functions:   functions,
 	})
 }
 
@@ -912,6 +1115,11 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 // failure cannot leak a connection string or query text to a caller.
 func (s *Server) errorStatus(r *http.Request, err error) (int, string) {
 	switch {
+	case errors.Is(err, store.ErrMalformedCursor):
+		// A cursor is a client-typed string; an unreadable one is the
+		// caller's mistake, not the server's.
+		return http.StatusBadRequest, err.Error()
+
 	case errors.Is(err, store.ErrNotFound), errors.Is(err, stellar.ErrContractNotFound), errors.Is(err, stellar.ErrWasmNotFound):
 		return http.StatusNotFound, err.Error()
 

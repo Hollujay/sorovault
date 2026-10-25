@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/soroworks/sorovault/actions/workflows/ci.yml/badge.svg)](https://github.com/soroworks/sorovault/actions/workflows/ci.yml)
 [![Security](https://github.com/soroworks/sorovault/actions/workflows/security.yml/badge.svg)](https://github.com/soroworks/sorovault/actions/workflows/security.yml)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/soroworks/sorovault/badge)](https://api.securityscorecards.dev/projects/github.com/soroworks/sorovault)
 [![Release](https://img.shields.io/github/v/release/soroworks/sorovault)](https://github.com/soroworks/sorovault/releases/latest)
 [![Go](https://img.shields.io/github/go-mod/go-version/soroworks/sorovault)](go.mod)
 [![License](https://img.shields.io/github/license/soroworks/sorovault)](LICENSE)
@@ -83,8 +84,15 @@ Worth writing down, because it is the part that is easy to get wrong:
    contract's `ScAddress`, the key `ScvLedgerKeyContractInstance`, and
    `Persistent` durability. `getLedgerEntries` returns a `ContractDataEntry`
    whose `Val.Instance.Executable.WasmHash` names the module.
-   - A Stellar asset contract has no `WasmHash` — it is built into the host, so
-     there is no interface to decode. SoroVault reports this distinctly.
+   - A Stellar Asset Contract has no `WasmHash` — it is built into the host, so
+     there is no uploaded interface to decode. SoroVault recognizes the on-ledger
+     `CONTRACT_EXECUTABLE_STELLAR_ASSET` discriminant and serves the documented
+     built-in interface under the stable identifier
+     `builtin:stellar-asset-contract:v1`. Its interface JSON is marked
+     `builtin: true` and cites the [official SAC specification](https://developers.stellar.org/docs/tokens/stellar-asset-contract).
+     Registering an SAC now returns its interface instead of the previous HTTP
+     422 response; `wasm_hash` is omitted from the contract interface response
+     and `interface_id` identifies the built-in definition.
 2. **Contract code.** Build a `LedgerKey` for `ContractCode` keyed by that hash.
    `getLedgerEntries` returns a `ContractCodeEntry` holding the module bytes.
    The hash is the SHA-256 of the module, which is what makes it a usable
@@ -103,6 +111,18 @@ Worth writing down, because it is the part that is easy to get wrong:
 
 The SDK does not parse WASM custom sections, so `internal/wasm` implements the
 small amount of the binary format that step 3 needs.
+
+
+### Link previews and sitemaps
+
+Set `PUBLIC_URL` to the externally reachable origin (for example,
+`https://registry.example.org`) to enable the XML sitemap at `/sitemap.xml`
+and canonical Open Graph URLs on contract pages. Contract pages include
+an escaped description with the network, number of functions, and first
+five function names. Sitemaps use `last_refreshed` for `<lastmod>`, and
+registries with over 49,999 contracts use a sitemap index that links to
+bounded pages of at most 50,000 URLs. When `PUBLIC_URL` is unset the
+sitemap is unavailable (404).
 
 ## Quickstart
 
@@ -167,6 +187,9 @@ be overridden in a values file. `RPC_URL`, `NETWORK_PASSPHRASE`, `HTTP_ADDR`,
 use `extraEnv` for other environment variables. The server and migration Job
 run non-root with read-only root filesystems.
 
+For production deployment — sizing, backups, upgrades and monitoring — see
+[docs/operations.md](docs/operations.md).
+
 ### Running locally
 
 ```console
@@ -187,14 +210,21 @@ All configuration is environment variables. Only `DATABASE_URL` (or the path in 
 |---|---|---|
 | `DATABASE_URL` | — | Postgres connection string. **Required** (or set `DATABASE_URL_FILE` to read it from a file). |
 | `MAX_CONCURRENT_REGISTRATIONS` | `4` | how many registrations and refreshes run at once |
+| `DATABASE_MAX_CONNS` | pgx's own (the greater of 4 or the CPU count) | most connections the pool holds open |
+| `DATABASE_MIN_CONNS` | `0` | connections the pool keeps open between requests |
 | `RPC_URL` | `https://soroban-testnet.stellar.org` | Stellar RPC endpoint |
 | `NETWORK_PASSPHRASE` | `Test SDF Network ; September 2015` | the network you expect `RPC_URL` to serve |
 | `HTTP_ADDR` | `:8080` | listen address |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
+| `LOG_FORMAT` | `text` | `text` for people, `json` for one parseable object per line |
 | `RPC_TIMEOUT` | `30s` | bound on a single contract fetch |
 | `REFRESH_INTERVAL` | `0` (off) | re-check registered contracts this often while serving; minimum `1m` |
 | `REFRESH_WEBHOOK_URL` | — | post a JSON message here whenever a refresh finds an upgraded contract |
 | `REFRESH_WEBHOOK_SECRET` | — | sign webhook payloads with HMAC-SHA256 |
+| `RATE_LIMIT_PER_MINUTE` | `30` | registrations and refreshes allowed per client per minute |
+| `RATE_LIMIT_BURST` | `10` | how many of those may arrive at once |
+| `TRUST_X_FORWARDED_FOR` | `false` | use the first `X-Forwarded-For` address as the client; only behind a trusted proxy |
+| `CORS_ORIGINS` | — | comma-separated exact browser origins, or `*` for read-only routes only |
 
 `NETWORK_PASSPHRASE` is a guard, not a source of truth. SoroVault reads the real
 passphrase from the RPC endpoint and refuses to proceed if the two disagree, so
@@ -208,6 +238,11 @@ within the interval. An upgraded contract gets a new interface version
 exactly as `POST /api/contracts/{id}/refresh` would record it; an unchanged
 one costs a single `getLedgerEntries` call and is not re-downloaded. Refreshes
 are spread at even offsets across the interval to avoid an RPC traffic burst.
+
+A rate-limited RPC response pauses the sweep and retries that contract with
+exponential backoff, capped at 16 seconds. After five retries, the sweep stops
+and leaves remaining contracts stale for the next scheduled sweep; the rate
+limit is logged once rather than once per contract.
 
 A contract that fails to refresh — expired, or an RPC error — is logged and
 skipped, and the sweep carries on. One sweep runs at startup and then one per
@@ -301,15 +336,68 @@ picks it up on the next sweep, since a contract that was not refreshed stays
 stale. The browse UI's registration form draws on the same budget and shows
 the same **503**, with the `Retry-After` header, inline on the page.
 
+### Connection pool
+
+SoroVault talks to Postgres through pgx's pool. Two variables size it:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DATABASE_MAX_CONNS` | pgx's own (the greater of 4 or the CPU count) | the most connections the pool holds open |
+| `DATABASE_MIN_CONNS` | `0` | the connections the pool keeps open between requests |
+
+Both are optional. Leaving them unset changes nothing: pgx sizes the pool,
+as it always has — the greater of 4 or the CPU count for the maximum, and
+none for the minimum. A value that is not a whole number, or that falls
+outside the accepted range — `1` to `10000` for the maximum, `0` to `10000`
+for the minimum — is a startup error rather than a silent fallback, and so
+is a minimum above the maximum.
+
+**Precedence.** pgx also reads `pool_max_conns` and `pool_min_conns` from
+the connection string:
+
+```text
+postgres://…/sorovault?sslmode=disable&pool_max_conns=8
+```
+
+The environment wins. `DATABASE_MAX_CONNS`, when it is set, replaces
+whatever `pool_max_conns` says, and `DATABASE_MIN_CONNS` replaces
+`pool_min_conns`. When the environment variable is unset the connection
+string's parameter applies, and when that is absent too, pgx's own default
+does. A connection string is often shared with other tools, so this keeps
+one deployment's settings from moving another's.
+
+**Sizing.** A Postgres connection is a server-side process: each one costs
+a few megabytes of memory on the server and a file descriptor on both ends.
+A sensible maximum is therefore well below the database's own
+`max_connections` (100 by default), leaving room for the migrations, the
+`psql` sessions and the monitoring that share the same server.
+
+SoroVault is mostly read-only — API reads are short queries, and a refresh
+sweep is the only sustained traffic — so the default pool is usually
+enough. Raise `DATABASE_MAX_CONNS` when requests queue behind a busy pool
+(`pool timeout` errors, or latency that grows with load), not because the
+number sounds better. Lower it on a small managed database, where the
+connection limit is often lower than Postgres's own default.
+
+Connections are opened on demand, so a large maximum costs nothing until
+the traffic arrives. `DATABASE_MIN_CONNS` keeps that many open between
+requests, which saves the handshake on the first request after an idle
+period; it is worth setting only when that latency matters and the database
+can afford the connections.
+
+The `migrate` command does not use this pool: it opens its own connection
+through golang-migrate, and migrations are short-lived either way.
+
 ## HTTP API
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/api/contracts` | list contracts — `?q=`, `?function=`, `?type=`, `?network=`, `?limit=`, `?offset=` |
+| `GET` | `/api/contracts` | list contracts — `?q=`, `?function=`, `?type=`, `?network=`, `?limit=`, `?cursor=` (`?offset=` still works but is deprecated; a cursor walk sees contracts registered mid-walk exactly once, an offset page repeats and skips them) |
 | `POST` | `/api/contracts` | register a contract — `{"contract_id": "C…"}` |
 | `POST` | `/api/contracts:batch` | register up to 20 contracts in one request — `{"contract_ids": ["C…", "C…"]}` |
 | `POST` | `/api/wasm/{hash}` | catalog uploaded code before a contract runs it |
 | `GET` | `/api/wasm/{hash}` | read a catalogued uploaded-code interface — `?network=` |
+| `GET` | `/api/contracts/{id}` | the decoded ABI — `?network=`, `?wasm_hash=`, `?download=1` |
 | `GET` | `/api/wasm/{hash}/contracts` | every contract running a given WASM — `?network=`, `?ever=`, `?limit=`, `?offset=` |
 | `GET` | `/api/contracts/{id}` | the decoded ABI — `?network=`, `?wasm_hash=` |
 | `PUT` | `/api/contracts/{id}/source` | attach a `source_url` and optional `source_commit` |
@@ -324,6 +412,10 @@ the same **503**, with the `Retry-After` header, inline on the page.
 | `GET` | `/api/upgrades` | recent interface upgrades, newest first — `?network=`, `?limit=`, `?offset=` |
 | `GET` | `/api/upgrades.atom` | the same upgrades as an Atom 1.0 feed |
 | `GET` | `/healthz` | liveness |
+| `GET` | `/readyz` | readiness: checks Postgres and RPC |
+
+Worked examples for each route, with requests and abbreviated responses, are in
+[docs/api-recipes.md](docs/api-recipes.md).
 
 `POST /api/contracts` returns **201** when the contract is new and **200** when
 it was already registered, so it is safe to retry. Passing `?wasm_hash=` to a
@@ -454,26 +546,37 @@ GET /api/wasm/c618dae264864ccf446a3c7db27da80c7c83e840131242cc2fe9cd32a2a20781/c
 and have since been upgraded; each result says whether the contract still runs
 it. The contract page links its WASM hash to this listing.
 
+`?download=1` serves a contract's interface as a file rather than a document
+the browser renders — `<contract>.<short-hash>.abi.json` — which is what the
+browse page's download link uses. The file holds the same document the plain
+`GET` returns: the interface, under `interface`, with the contract's metadata
+beside it.
+
 ## CLI
 
 ```console
-sorovault add <contract_id>...      # fetch, decode and register
+sorovault add <contract_id>...      # fetch, decode and register (--from-file)
 sorovault remove <contract_id>      # delete a contract and its versions (--yes)
-sorovault refresh <contract_id>...  # re-check for an upgraded interface
+sorovault refresh <contract_id>...  # re-check for an upgraded interface (--from-file)
 sorovault refresh --all             # one sweep over every contract (--json)
 sorovault list                      # -q, --function, --type, --network, --limit, --offset
 sorovault get <contract_id>         # --function, --wasm-hash, --json
 sorovault versions <contract_id>    # --network, --json
+sorovault codegen <contract_id>     # --lang ts|md|examples; -o, --wasm-hash, --package, --zod
 sorovault codegen <contract_id>     # --lang ts|md|examples; -o, --wasm-hash, --package
+sorovault check-client <client.ts>  # --contract, --api, --network; exits non-zero when stale
 sorovault export [file]             # versioned JSON backup (-o)
 sorovault import [file]             # restore a backup (--merge)
 sorovault serve                     # JSON API + browse UI
 sorovault migrate                   # apply schema migrations
+sorovault migrate status            # --json
 sorovault doctor                    # check a deployment's health
 ```
 
 `add` and `refresh` accept several contract IDs and report per-contract
-failures without abandoning the rest. `list` takes `--function` and `--type`
+failures without abandoning the rest. Both accept `--from-file path` to read
+additional IDs, one per line; blank lines and lines beginning with `#` are
+ignored, and `--from-file -` reads standard input. `list` takes `--function` and `--type`
 for the same exact-name filters the API offers. Every read command takes
 `--json`, which emits exactly what the API serves:
 
@@ -534,6 +637,55 @@ the network. It reads the same configuration as everything else, so a
 deployment missing its `DATABASE_URL` is reported as a configuration error
 rather than a passing check.
 
+### `sorovault migrate status`
+
+Before an upgrade, an operator wants to know what is applied and what is
+pending — without applying anything. `migrate status` says exactly that, and
+nothing more:
+
+```console
+$ sorovault migrate status
+current version: 2
+latest version:  4
+
+pending migrations:
+  VERSION  NAME
+  3        wasm_specs
+  4        contract_source
+```
+
+The version the database has applied, and whether it is dirty, come from
+golang-migrate — the same source `sorovault migrate` applies, so the two
+cannot disagree. The latest version, and the migrations still to come, are
+the ones embedded in this binary. No migration is applied: a status run
+reports and stops there. It does read the database through golang-migrate,
+which creates the migrator's own version table if the database has not been
+migrated yet — nothing else is written. A database role that may only read
+will therefore fail the command; `sorovault doctor` reads the same state
+without writing anything.
+
+The command exits non-zero when migrations are pending, so it can gate a
+deployment. A database marked **dirty** — a migration that failed partway, so
+the schema is in an unknown state — is reported as such, with what to do
+about it, and also exits non-zero.
+
+`--json` emits the same report as JSON, for a gate that reads it rather than
+a person. The `message` says what the report means and what to do about it,
+so a reader of the JSON is told what a reader of the text report is:
+
+```console
+$ sorovault migrate status --json
+{
+  "current_version": 2,
+  "latest_version": 4,
+  "dirty": false,
+  "pending": [
+    { "version": 3, "name": "wasm_specs" },
+    { "version": 4, "name": "contract_source" }
+  ],
+  "message": "2 migration(s) pending; run `sorovault migrate` to apply them"
+}
+```
 ### Shell completion
 
 `sorovault completion bash|zsh|fish|powershell` prints a completion script (this
@@ -596,6 +748,71 @@ Type mappings follow the Stellar CLI's own bindings (`u64`→`bigint`,
 the SDK unchanged. It requires `@stellar/stellar-sdk` 14 or later and
 `buffer`.
 
+### Runtime validation
+
+TypeScript types disappear at compile time, but a frontend taking user input
+before building a transaction can validate against the same shapes at
+runtime with `--zod` (or `client.ts?zod=1` over the API). The generated file
+gains a schemas section — one Zod schema per struct, union and enum, plus
+one per function's argument list — with the widths enforced exactly:
+integer bounds at each kind's limits and exact byte lengths for
+`BytesN<N>`:
+
+```ts
+import { voteArgsSchema } from "./zkvote";
+
+const args = voteArgsSchema.parse(JSON.parse(input)); // throws before anything ships
+const tx = await client.vote(args);
+```
+
+A schema for a user-defined type references the others through `z.lazy`, so
+recursive interfaces stay legal, and the section compiles standalone: with
+`--zod` the file imports `zod` itself, and a package generated with
+`--package --zod` pins `zod` as a peer dependency at the same version CI
+type-checks the golden validators against.
+
+### Staleness checks
+
+Every generated file embeds the interface version it was built from: the
+`wasmHash` constant next to `contractId` and `networkName`, also visible in
+the file header. When the contract upgrades, a client generated for the old
+interface keeps connecting but calls `vote` against functions that may no
+longer exist. `assertSameWasm(liveHash)` compares the embedded constant with
+the live hash — `GET /api/contracts/{id}` returns `wasm_hash` — warns on a
+mismatch, and returns whether the client still matches:
+
+```ts
+import { assertSameWasm, connect } from "./zkvote";
+
+const meta = await fetch("https://sorovault.example/api/contracts/CDZZ…4PAN").then(r => r.json());
+if (!assertSameWasm(meta.wasm_hash)) {
+  // The contract was upgraded: regenerate, or keep the behavior your
+  // app was built against with the pinned client ?wasm_hash= serves.
+}
+```
+
+Checking is opt-in: nothing happens unless the application calls it, so
+offline use stays untouched, and a project that commits its client keeps it
+byte-identical until the interface actually changes.
+
+### Checking a committed client for staleness
+
+Generated clients embed the WASM hash they were built for as the `wasmHash`
+constant next to `contractId`. For a project that commits its client,
+`sorovault check-client` compares that file with SoroVault's live hash and
+with the client the server would generate now, and names the functions
+added, removed or changed when the interface moved:
+
+```console
+$ sorovault check-client zkvote.ts --contract CDZZ…4PAN --api https://sorovault.example
+zkvote.ts: added to the interface
+tally: added to the interface
+zkvote.ts is stale; regenerate it and commit the result
+```
+
+It exits non-zero when anything differs, so a CI job can fail politely with
+a reason instead of failing deep inside a call.
+
 ### Packages
 
 `--package` writes a complete npm package instead of a bare file, so a client
@@ -647,9 +864,17 @@ selectable text.
 
 `POST /api/wasm/{hash}` catalogs uploaded code by its 64-character SHA-256
 hash, even before a contract instance uses it. Its decoded interface is then
-available from `GET /api/wasm/{hash}`. Attach a contract repository URL and an
-optional 40- or 64-character commit hash with `PUT /api/contracts/{id}/source`;
-the browse page displays the repository and commit with the interface.
+available from `GET /api/wasm/{hash}`. To see what a module would expose
+before it is ever deployed — a doc comment that should have rendered, a type
+that should have changed — `POST /api/decode` with the file as the request
+body (raw or as a `multipart/form-data` file) answers with the ABI JSON and
+stores nothing; `?format=ts` returns the generated TypeScript client
+instead. The body is limited to 512 KiB, four times the 128 KiB the network
+allows as contract code.
+
+Attach a contract repository URL and an optional 40- or 64-character commit
+hash with `PUT /api/contracts/{id}/source`; the browse page displays the
+repository and commit with the interface.
 
 ## The ABI JSON
 
@@ -823,3 +1048,10 @@ contracts themselves. SoroVault reads chain state; it never sends a transaction.
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
+
+
+## Token standard detection
+
+SoroVault classifies a contract against versioned interface definitions after decoding its interface. The first matcher is SEP-41 Soroban Token Interface [v0.5.2](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0041.md), a draft version pinned by the matcher. Matching requires every required function name, ordered argument type, and return type to match exactly; names alone are not enough. The API accepts repeatable `implements` filters, for example `GET /api/contracts?implements=sep41`, and the browse list shows a badge for detected standards.
+
+Existing registry rows are classified on their next successful registration or refresh. The migration does not infer standards from old JSON rows, so an older contract will not appear in a standard-filtered listing until refreshed.

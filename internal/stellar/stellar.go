@@ -13,6 +13,9 @@ import (
 	"fmt"
 )
 
+// BuiltinSACIdentifier is a stable interface key, not a WASM hash.
+const BuiltinSACIdentifier = "builtin:stellar-asset-contract:v1"
+
 // ErrContractNotFound reports that the network has no live instance entry
 // for a contract ID. That covers both a contract that was never deployed and
 // one whose entry has expired and not been restored.
@@ -26,6 +29,10 @@ var ErrNoWasm = errors.New("stellar: contract has no uploaded wasm")
 // ErrWasmNotFound reports that the network has no uploaded code for a hash.
 var ErrWasmNotFound = errors.New("stellar: wasm not found on network")
 
+// ErrRateLimited reports that the RPC endpoint refused a request because
+// its rate limit was exceeded.
+var ErrRateLimited = errors.New("stellar: RPC rate limit exceeded")
+
 // Contract is a deployed contract's code as fetched from the network.
 type Contract struct {
 	// ID is the contract's strkey address ("C...").
@@ -35,6 +42,9 @@ type Contract struct {
 	WasmHash string
 	// Wasm is the uploaded module.
 	Wasm []byte
+	// Builtin is true when the executable is supplied by the Stellar protocol,
+	// rather than by uploaded WASM (for example, a Stellar Asset Contract).
+	Builtin bool
 }
 
 // Fetcher reads deployed contract code from a network.

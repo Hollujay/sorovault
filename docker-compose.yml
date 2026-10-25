@@ -29,6 +29,19 @@ services:
     command: ["migrate"]
     environment:
       DATABASE_URL: postgres://sorovault:sorovault@db:5432/sorovault?sslmode=disable
+    # Neither service writes to its own filesystem: the templates and the
+    # migrations are embedded in the binary, and the database lives in the db
+    # container. Dropping every capability and forbidding privilege escalation
+    # costs nothing for the same reason — the process only ever opens sockets.
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    # The image's healthcheck probes the serve process. This container applies
+    # migrations and exits, so it has nothing to answer; without this it would
+    # be reported unhealthy even though it succeeded.
+    healthcheck:
+      disable: true
     depends_on:
       db:
         condition: service_healthy
@@ -44,6 +57,10 @@ services:
       HTTP_ADDR: ":8080"
       LOG_LEVEL: ${LOG_LEVEL:-info}
       REFRESH_INTERVAL: ${REFRESH_INTERVAL:-0}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
     ports:
       - "8080:8080"
     depends_on:

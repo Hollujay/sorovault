@@ -10,6 +10,9 @@ updates:
         update-types: [minor, patch]
     open-pull-requests-limit: 5
 
+  # The workflows pin every action to a commit SHA, with the version in a
+  # trailing comment. Dependabot understands that form: it rewrites the SHA
+  # and the comment together, so pinning costs us no updates.
   - package-ecosystem: github-actions
     directory: /
     schedule:

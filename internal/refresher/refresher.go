@@ -16,7 +16,14 @@ import (
 	"time"
 
 	"github.com/soroworks/sorovault/internal/registry"
+	"github.com/soroworks/sorovault/internal/stellar"
 	"github.com/soroworks/sorovault/internal/store"
+)
+
+const (
+	initialRateLimitBackoff = time.Second
+	maxRateLimitBackoff     = 16 * time.Second
+	maxRateLimitRetries     = 5
 )
 
 // Registry is the slice of *registry.Registry a sweep needs. It is an
@@ -219,6 +226,8 @@ func (r *Refresher) sweep(ctx context.Context, all bool) (Summary, error) {
 	remainder := int64(r.interval % time.Duration(count))
 	var target time.Duration
 	var remainderProgress int64
+	rateLimitBackoff := initialRateLimitBackoff
+	rateLimitLogged := false
 	for i, contract := range stale {
 		if ctx.Err() != nil {
 			return sum, ctx.Err()
@@ -238,7 +247,41 @@ func (r *Refresher) sweep(ctx context.Context, all bool) (Summary, error) {
 		}
 
 		sum.Checked++
-		result, err := r.refreshOne(ctx, contract.ContractID)
+		var result *registry.Result
+		var rateLimitRetries int
+		for {
+			result, err = r.refreshOne(ctx, contract.ContractID)
+			if !errors.Is(err, stellar.ErrRateLimited) {
+				break
+			}
+
+			if !rateLimitLogged {
+				r.log.WarnContext(ctx, "RPC rate-limited refresh sweep; backing off",
+					"contract_id", contract.ContractID, "network", network,
+					"delay", rateLimitBackoff, "error", err)
+				rateLimitLogged = true
+			} else {
+				r.log.DebugContext(ctx, "RPC still rate-limiting refresh sweep",
+					"contract_id", contract.ContractID, "network", network,
+					"delay", rateLimitBackoff)
+			}
+
+			if rateLimitRetries == maxRateLimitRetries {
+				sum.Failed++
+				return sum, nil
+			}
+			if err := r.wait(ctx, rateLimitBackoff); err != nil {
+				return sum, err
+			}
+			rateLimitRetries++
+			if rateLimitBackoff < maxRateLimitBackoff {
+				rateLimitBackoff *= 2
+				if rateLimitBackoff > maxRateLimitBackoff {
+					rateLimitBackoff = maxRateLimitBackoff
+				}
+			}
+		}
+		rateLimitBackoff = initialRateLimitBackoff
 		if err != nil {
 			// A busy registry is not a failure: the contract stays stale
 			// and the next sweep tries again. Failing it would report a

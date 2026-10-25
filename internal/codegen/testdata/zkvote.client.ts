@@ -101,3 +101,21 @@ export function connect(
 ): Promise<sdk.Client & Client> {
   return sdk.Client.from<Client>({ ...options, contractId: options.contractId ?? contractId });
 }
+
+/**
+ * assertSameWasm warns when the deployed contract no longer runs the
+ * interface this client was generated for: an upgrade may have removed
+ * or changed the functions above, and the old method names would fail
+ * deep inside a call. Pass the contract's live wasm_hash — SoroVault's
+ * GET /api/contracts/{id} returns it — and the function returns whether
+ * the client still matches. Calling it is entirely optional: nothing
+ * happens without it, so offline use keeps working.
+ */
+export function assertSameWasm(liveHash: string): boolean {
+  if (liveHash === wasmHash) return true;
+  console.warn(
+    "[sorovault] contract " + contractId + " changed: this client was generated" +
+      " for WASM " + wasmHash + " but the live hash is " + liveHash + ". Regenerate the client.",
+  );
+  return false;
+}

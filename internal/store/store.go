@@ -1,10 +1,10 @@
 // Package store persists the contract registry.
 //
-// The registry keeps two things per contract: a row tracking which WASM the
-// contract currently runs, and one immutable spec row per WASM hash it has
-// ever run. Refreshing a contract therefore appends a version rather than
-// overwriting one, so an interface that was live at some point stays
-// retrievable after the contract is upgraded.
+// The registry keeps two things per contract: a row tracking its current
+// interface version identifier, and one immutable spec row per identifier it
+// has ever used. Uploaded contracts use their WASM hash; protocol-provided
+// contracts such as SACs use a stable built-in identifier. Refreshing a
+// contract therefore appends a version rather than overwriting one.
 package store
 
 import (
@@ -60,12 +60,18 @@ type Contract struct {
 	SourceCommit    string    `json:"source_commit,omitempty"`
 	FirstSeen       time.Time `json:"first_seen"`
 	LastRefreshed   time.Time `json:"last_refreshed"`
+	// ObservedLedger is only passed to Save for a newly observed version.
+	ObservedLedger *uint32 `json:"-"`
 
 	// MissingSince is when a refresh first found the contract absent from
 	// the network. It is nil while the contract is live, and is cleared by
 	// the next save, which only happens once the contract has been fetched
 	// again.
 	MissingSince *time.Time `json:"missing_since,omitempty"`
+
+	// Implements lists the standard interface IDs detected from the current
+	// decoded interface, such as "sep41".
+	Implements []string `json:"implements,omitempty"`
 
 	// Matches lists the interface symbols — functions, types, events — that
 	// a search query matched. It is only set on search results, and is
@@ -176,6 +182,8 @@ type Spec struct {
 	WasmHash   string           `json:"wasm_hash"`
 	Interface  *model.Interface `json:"interface"`
 	DecodedAt  time.Time        `json:"decoded_at"`
+	// ObservedLedger is the ledger at observation, not the upgrade ledger.
+	ObservedLedger *uint32 `json:"observed_ledger"`
 }
 
 // WasmSpec is a decoded interface for uploaded code that no registered
@@ -190,9 +198,13 @@ type WasmSpec struct {
 // SpecVersion summarises a stored spec without its body, for listing the
 // versions of a contract cheaply.
 type SpecVersion struct {
-	WasmHash  string    `json:"wasm_hash"`
-	DecodedAt time.Time `json:"decoded_at"`
-	Current   bool      `json:"current"`
+	WasmHash    string    `json:"wasm_hash,omitempty"`
+	InterfaceID string    `json:"interface_id,omitempty"`
+	Builtin     bool      `json:"builtin,omitempty"`
+	DecodedAt   time.Time `json:"decoded_at"`
+	Current     bool      `json:"current"`
+	// ObservedLedger is the ledger at observation, not the upgrade ledger.
+	ObservedLedger *uint32 `json:"observed_ledger"`
 }
 
 // ListFilter selects and pages a contract listing.
@@ -210,11 +222,25 @@ type ListFilter struct {
 	// Types restricts results to contracts whose current interface declares
 	// a user-defined type with exactly this name. Every name must match.
 	Types []string
+	// Implements restricts results to contracts implementing every listed standard ID.
+	Implements []string
 	// Limit is the maximum number of rows to return. Zero means
 	// DefaultLimit; anything above MaxLimit is clamped to MaxLimit.
 	Limit int
-	// Offset is the number of rows to skip.
+	// Offset is the number of rows to skip. Offset paging is kept for
+	// compatibility — it never breaks outright — but cursor paging below
+	// is what callers should reach for: offsets grow slower as the
+	// registry grows, and rows added while a client pages make offset
+	// pages repeat and skip each other. (The Go doc does not carry the
+	// formal Deprecated marker, because staticcheck then rejects the
+	// compatibility paths that still must honor it — the deprecation is
+	// voiced at the API surface instead.)
 	Offset int
+	// Cursor continues from where a previous page ended. An empty cursor
+	// starts from the top, so a first request carries none. A cursor and
+	// an offset are exclusive: ask for one page in one of the two ways.
+	// A cursor the store cannot read is ErrMalformedCursor.
+	Cursor string
 }
 
 // Paging bounds for ListFilter.
@@ -235,6 +261,7 @@ func (f *ListFilter) Normalize() {
 	f.Query = strings.ReplaceAll(f.Query, "\x00", "\uFFFD")
 	f.Functions = cleanNames(f.Functions)
 	f.Types = cleanNames(f.Types)
+	f.Implements = cleanNames(f.Implements)
 	if f.Limit <= 0 {
 		f.Limit = DefaultLimit
 	}
@@ -260,11 +287,27 @@ func cleanNames(names []string) []string {
 	return out
 }
 
+func hasAllStandards(have, want []string) bool {
+	present := make(map[string]struct{}, len(have))
+	for _, id := range have {
+		present[id] = struct{}{}
+	}
+	for _, id := range want {
+		if _, ok := present[id]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // ContractPage is one page of a contract listing.
 type ContractPage struct {
 	Contracts []Contract `json:"contracts"`
 	// Total is how many contracts match the filter, ignoring paging.
 	Total int `json:"total"`
+	// Next carries the cursor of the following page when this page did
+	// not reach the end of the matches. Empty means the walk is over.
+	Next string `json:"next"`
 }
 
 // WasmFilter selects the contracts that run a given WASM hash.
@@ -466,6 +509,10 @@ type Store interface {
 
 	// ListVersions returns every stored version of a contract, newest first.
 	ListVersions(ctx context.Context, network, contractID string) ([]SpecVersion, error)
+
+	// Ping reports whether the store's backing service answers. Readiness
+	// uses it; it must not change any stored data.
+	Ping(ctx context.Context) error
 
 	// Close releases any resources held by the store.
 	Close() error

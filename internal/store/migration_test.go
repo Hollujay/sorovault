@@ -21,6 +21,29 @@ func TestLatestMigrationVersion(t *testing.T) {
 	assert.Positive(t, latest, "the repository ships migrations")
 }
 
+// TestEmbeddedMigrations proves the embedded migrations can be listed by name
+// without a database, which is what "migrate status" reports as pending.
+func TestEmbeddedMigrations(t *testing.T) {
+	t.Parallel()
+
+	migrations, err := store.EmbeddedMigrations()
+	require.NoError(t, err)
+	require.NotEmpty(t, migrations, "the repository ships migrations")
+
+	for i, m := range migrations {
+		assert.NotEmpty(t, m.Name, "a migration must have a name")
+		if i > 0 {
+			assert.Greater(t, m.Version, migrations[i-1].Version,
+				"migrations must be listed oldest first")
+		}
+	}
+
+	latest, err := store.LatestMigrationVersion()
+	require.NoError(t, err)
+	assert.Equal(t, latest, migrations[len(migrations)-1].Version,
+		"the latest version must be the last migration")
+}
+
 // TestMigrationStatusMatchesTheMigrator proves the read-only version check
 // agrees with golang-migrate about where the database is.
 func TestMigrationStatusMatchesTheMigrator(t *testing.T) {

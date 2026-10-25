@@ -5,7 +5,7 @@
 {{define "anchor_link"}}<a class="anchor" href="#{{.ID}}" title="Link to {{.Label}}" aria-label="Link to {{.Label}}">#</a>{{end}}
 
 {{define "contract.html"}}
-{{template "page_head" "SoroVault · contract"}}
+{{template "contract_head" .}}
 
 <nav class="crumbs"><a href="/">← All contracts</a></nav>
 
@@ -16,6 +16,9 @@
 
 <dl class="facts">
   <div><dt>Network</dt><dd><span class="badge">{{.Contract.Network}}</span></dd></div>
+  {{if .Interface.Builtin}}
+  <div><dt>Interface</dt><dd><span class="badge">Built-in Stellar Asset Contract</span> <code>{{.Spec.WasmHash}}</code></dd></div>
+  {{else}}
   <div>
     <dt>WASM hash</dt>
     <dd class="mono break">
@@ -23,6 +26,7 @@
       <button class="copy" type="button" data-copy="#wasm-hash" aria-label="Copy WASM hash">{{template "copy_icon"}}</button>
     </dd>
   </div>
+  {{end}}
   {{if .Interface.EnvMeta}}
   <div><dt>Protocol</dt><dd class="mono">{{.Interface.EnvMeta.InterfaceVersion}}</dd></div>
   {{end}}
@@ -91,7 +95,7 @@
       <p class="returns">
         returns <code>{{if .Outputs}}{{range typeParts (index .Outputs 0) $.Interface}}{{if .Href}}<a class="{{.Class}}" href="{{.Href}}">{{.Text}}</a>{{else}}<span class="{{.Class}}">{{.Text}}</span>{{end}}{{end}}{{else}}(){{end}}</code>
         <a class="jsonlink"
-           href="/api/contracts/{{$.Contract.ContractID}}/functions/{{.Name}}?network={{$.Contract.Network}}&amp;wasm_hash={{$.Spec.WasmHash}}">JSON</a>
+           href="/api/contracts/{{$.Contract.ContractID}}/functions/{{.Name}}?network={{$.Contract.Network}}{{if not $.Interface.Builtin}}&amp;wasm_hash={{$.Spec.WasmHash}}{{end}}">JSON</a>
       </p>
     </article>
     {{end}}
@@ -176,11 +180,11 @@
 <section>
   <h2>Versions</h2>
   <table class="contracts">
-    <thead><tr><th>WASM hash</th><th>Decoded</th><th></th></tr></thead>
+    <thead><tr><th>Interface ID / WASM hash</th><th>Decoded</th><th></th></tr></thead>
     <tbody>
     {{range .Versions}}
       <tr>
-        <td><a class="mono" href="/contracts/{{$.Contract.ContractID}}?network={{$.Contract.Network}}&amp;wasm_hash={{.WasmHash}}">{{short .WasmHash 24}}</a></td>
+        <td><a class="mono" href="/contracts/{{$.Contract.ContractID}}?network={{$.Contract.Network}}{{if .WasmHash}}&amp;wasm_hash={{.WasmHash}}{{end}}">{{if .Builtin}}Built-in SAC interface{{else}}{{short .WasmHash 24}}{{end}}</a></td>
         <td class="dim">{{.DecodedAt.UTC.Format "2006-01-02 15:04"}} UTC</td>
         <td>{{if .Current}}<span class="badge current">current</span>{{end}}</td>
       </tr>
@@ -191,9 +195,11 @@
 
 <p class="jsonfoot">
   Full ABI as JSON:
-  <a class="mono" href="/api/contracts/{{.Contract.ContractID}}?network={{.Contract.Network}}&amp;wasm_hash={{.Spec.WasmHash}}">/api/contracts/{{short .Contract.ContractID 12}}</a>
+  <a class="mono" href="/api/contracts/{{.Contract.ContractID}}?network={{.Contract.Network}}{{if not .Interface.Builtin}}&amp;wasm_hash={{.Spec.WasmHash}}{{end}}">/api/contracts/{{short .Contract.ContractID 12}}</a>
+  · Download:
+  <a class="mono" href="/api/contracts/{{.Contract.ContractID}}?network={{.Contract.Network}}{{if not .Interface.Builtin}}&amp;wasm_hash={{.Spec.WasmHash}}{{end}}&amp;download=1">{{abiFilename .Contract.ContractID .Spec.WasmHash}}</a>
   · Typed client:
-  <a href="/api/contracts/{{.Contract.ContractID}}/client.ts?network={{.Contract.Network}}&amp;wasm_hash={{.Spec.WasmHash}}&amp;download=1">TypeScript</a>
+  <a href="/api/contracts/{{.Contract.ContractID}}/client.ts?network={{.Contract.Network}}{{if not .Interface.Builtin}}&amp;wasm_hash={{.Spec.WasmHash}}{{end}}&amp;download=1">TypeScript</a>
 </p>
 
 {{template "page_foot"}}

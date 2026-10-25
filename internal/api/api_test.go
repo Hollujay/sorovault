@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/soroworks/sorovault/internal/api"
+	"github.com/soroworks/sorovault/internal/model"
 	"github.com/soroworks/sorovault/internal/registry"
 	"github.com/soroworks/sorovault/internal/spec"
 	"github.com/soroworks/sorovault/internal/stellar/stellartest"
@@ -51,12 +52,16 @@ func newHarnessWith(t *testing.T, opts registry.Options) *harness {
 	return newHarnessWithOptions(t, stellartest.New(), store.NewMemory(), opts)
 }
 
+// newHarnessWithStore is newHarness with a store of the caller's choosing,
+// so a test can watch what the API does with one.
 func newHarnessWithStore(t *testing.T, fake *stellartest.Fake, db store.Store) *harness {
 	t.Helper()
 
 	return newHarnessWithOptions(t, fake, db, registry.Options{})
 }
 
+// newHarnessWithOptions builds a harness over the given network, store and
+// registry options.
 func newHarnessWithOptions(t *testing.T, fake *stellartest.Fake, db store.Store, opts registry.Options) *harness {
 	t.Helper()
 
@@ -932,6 +937,72 @@ func TestRealFixtureServesUsableABI(t *testing.T) {
 	assert.Contains(t, h.decode(t, raw)["signature"], "pub_signals: Vec<BytesN<32>>")
 }
 
+// TestDownloadContractABI proves the interface can be saved as a file rather
+// than displayed, under a name that says which contract and version it is.
+func TestDownloadContractABI(t *testing.T) {
+	t.Parallel()
+
+	old := moduleWith(t, "v1")
+	h := newHarness(t)
+	h.fake.Deploy(idA, old)
+	resp, raw := h.do(t, http.MethodPost, "/api/contracts", `{"contract_id":"`+idA+`"}`)
+	require.Equal(t, http.StatusCreated, resp.StatusCode, string(raw))
+
+	t.Run("without the parameter the interface is displayed", func(t *testing.T) {
+		resp, _ := h.do(t, http.MethodGet, "/api/contracts/"+idA, "")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Empty(t, resp.Header.Get("Content-Disposition"))
+	})
+
+	t.Run("the current interface is offered as a download", func(t *testing.T) {
+		resp, raw := h.do(t, http.MethodGet, "/api/contracts/"+idA+"?download=1", "")
+		require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+		assert.Contains(t, resp.Header.Get("Content-Type"), "application/json")
+
+		hash := h.decode(t, raw)["wasm_hash"].(string)
+		// The name is spelled out rather than built from the helper the
+		// handler uses: the .abi.json suffix is part of what the file is
+		// promised to be, and a test that reuses the implementation cannot
+		// notice it changing.
+		assert.Equal(t, idA+"."+hash[:12]+".abi.json",
+			attachmentName(t, resp.Header.Get("Content-Disposition")),
+			"the file must be named after the contract and the version it was decoded from")
+	})
+
+	t.Run("a superseded version is saved under its own hash", func(t *testing.T) {
+		h.fake.Upgrade(idA, moduleWith(t, "v2"))
+		resp, _ := h.do(t, http.MethodPost, "/api/contracts/"+idA+"/refresh", "")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+
+		oldHash := stellartest.HashOf(old)
+		resp, _ = h.do(t, http.MethodGet, "/api/contracts/"+idA+"?wasm_hash="+oldHash+"&download=1", "")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, idA+"."+oldHash[:12]+".abi.json",
+			attachmentName(t, resp.Header.Get("Content-Disposition")),
+			"two versions of one contract must not be saved under the same name")
+	})
+
+	t.Run("a contract that is not there is not offered as a file", func(t *testing.T) {
+		resp, _ := h.do(t, http.MethodGet, "/api/contracts/"+idB+"?download=1", "")
+		require.Equal(t, http.StatusNotFound, resp.StatusCode)
+		assert.Empty(t, resp.Header.Get("Content-Disposition"),
+			"a failed request must not name a file to save")
+	})
+}
+
+// attachmentName pulls the file name out of a Content-Disposition header.
+func attachmentName(t *testing.T, header string) string {
+	t.Helper()
+
+	const prefix = `attachment; filename="`
+	require.True(t, strings.HasPrefix(header, prefix),
+		"the response must offer the document as a file, got %q", header)
+
+	name := strings.TrimSuffix(strings.TrimPrefix(header, prefix), `"`)
+	require.NotEmpty(t, name, "a download must be given a name")
+	return name
+}
+
 func TestTypeScriptClient(t *testing.T) {
 	t.Parallel()
 
@@ -952,9 +1023,41 @@ func TestTypeScriptClient(t *testing.T) {
 	assert.Contains(t, body, `export const contractId = "`+idA+`";`)
 	assert.Contains(t, body, `export const wasmHash = "`+stellartest.HashOf(module)+`";`)
 	assert.Contains(t, body, "has_voted(args: { nullifier: Buffer }")
+	assert.Contains(t, body, "export function assertSameWasm(liveHash: string): boolean {")
+	assert.Contains(t, body, "if (liveHash === wasmHash) return true;")
+
+	// An upgrade moves what the default client is generated from; the
+	// ?wasm_hash= client stays pinned to the superseded version, byte for
+	// byte, so a committed client can be regenerated to compare against.
+	old := stellartest.HashOf(module)
+	upgrade := moduleWith(t, "score")
+	h.fake.Deploy(idA, upgrade)
+	resp, raw = h.do(t, http.MethodPost, "/api/contracts", `{"contract_id":"`+idA+`"}`)
+	// The upgrade is a change to a known contract, not a new one.
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+
+	resp, raw = h.do(t, http.MethodGet, "/api/contracts/"+idA+"/client.ts?wasm_hash="+old, "")
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+	assert.Contains(t, string(raw), `export const wasmHash = "`+old+`";`)
+	assert.Contains(t, string(raw), "has_voted(args: { nullifier: Buffer }")
+	assert.NotContains(t, string(raw), "score(args")
+
+	resp, raw = h.do(t, http.MethodGet, "/api/contracts/"+idA+"/client.ts", "")
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+	assert.Contains(t, string(raw), `export const wasmHash = "`+stellartest.HashOf(upgrade)+`";`)
+	assert.Contains(t, string(raw), "score(args: { who: string }")
+	assert.NotContains(t, string(raw), "has_voted")
 
 	resp, _ = h.do(t, http.MethodGet, "/api/contracts/"+idA+"/client.ts?download=1", "")
 	assert.Equal(t, `attachment; filename="`+idA+`.client.ts"`, resp.Header.Get("Content-Disposition"))
+
+	resp, raw = h.do(t, http.MethodGet, "/api/contracts/"+idA+"/client.ts?zod=1", "")
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+	zod := string(raw)
+	assert.Contains(t, zod, `import { z } from "zod";`)
+	assert.Contains(t, zod, "export const scoreArgsSchema = z.object({", "the schemas track the live interface")
+	assert.NotContains(t, zod, "ProposalSchema", "schemas follow what the interface holds now")
+	assert.NotContains(t, body, `import { z } from "zod";`, "the plain flavour stays zod-free")
 
 	resp, _ = h.do(t, http.MethodGet, "/api/contracts/"+idB+"/client.ts", "")
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
@@ -1008,4 +1111,85 @@ type databaseDownError struct{}
 
 func (*databaseDownError) Error() string {
 	return "dial tcp: connection string postgres://user:hunter2@db/registry refused"
+}
+
+func TestRegisterStellarAssetContract(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.fake.DeploySAC(idA)
+
+	resp, raw := h.do(t, http.MethodPost, "/api/contracts", `{"contract_id":"`+idA+`"}`)
+	require.Equal(t, http.StatusCreated, resp.StatusCode, string(raw))
+	registered := h.decode(t, raw)
+	iface := registered["interface"].(map[string]any)
+	assert.Equal(t, true, iface["builtin"])
+	assert.Equal(t, "https://developers.stellar.org/docs/tokens/stellar-asset-contract", iface["source"])
+	assert.Len(t, iface["functions"].([]any), 17)
+
+	resp, raw = h.do(t, http.MethodGet, "/api/contracts/"+idA, "")
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+	got := h.decode(t, raw)
+	assert.Equal(t, true, got["builtin"])
+	assert.Equal(t, "builtin:stellar-asset-contract:v1", got["interface_id"])
+	assert.NotContains(t, got, "wasm_hash")
+
+	resp, raw = h.do(t, http.MethodGet, "/api/contracts/"+idA+"/functions", "")
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+	got = h.decode(t, raw)
+	assert.Equal(t, true, got["builtin"])
+	assert.Equal(t, "builtin:stellar-asset-contract:v1", got["interface_id"])
+	assert.NotContains(t, got, "wasm_hash")
+
+	resp, raw = h.do(t, http.MethodGet, "/api/contracts/"+idA+"/versions", "")
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+	got = h.decode(t, raw)
+	versions := got["versions"].([]any)
+	require.Len(t, versions, 1)
+	version := versions[0].(map[string]any)
+	assert.Equal(t, true, version["builtin"])
+	assert.Equal(t, "builtin:stellar-asset-contract:v1", version["interface_id"])
+	assert.NotContains(t, version, "wasm_hash")
+
+	resp, raw = h.do(t, http.MethodGet, "/api/contracts/"+idA+"/client.ts", "")
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+	assert.Contains(t, string(raw), `export const interfaceId = "builtin:stellar-asset-contract:v1";`)
+	assert.NotContains(t, string(raw), "export const wasmHash")
+}
+
+func TestListContractsFiltersByImplementedStandard(t *testing.T) {
+	h := newHarness(t)
+	defer h.server.Close()
+
+	functions := make([]model.Function, 0, len(spec.SEP41.Functions))
+	for _, required := range spec.SEP41.Functions {
+		inputs := make([]model.Param, 0, len(required.Inputs))
+		for i, typ := range required.Inputs {
+			inputs = append(inputs, model.Param{Name: string(rune('a' + i)), Type: typ})
+		}
+		functions = append(functions, model.Function{
+			Name: required.Name, Inputs: inputs, Outputs: append([]model.Type(nil), required.Outputs...),
+		})
+	}
+	tokenInterface := &model.Interface{ABIVersion: model.ABIVersion, Functions: functions}
+	plainInterface := &model.Interface{ABIVersion: model.ABIVersion, Functions: []model.Function{
+		{Name: "transfer", Inputs: []model.Param{{Name: "amount", Type: model.Scalar(model.KindU32)}}},
+	}}
+
+	ctx := context.Background()
+	require.NoError(t, h.store.Save(ctx, store.Contract{ContractID: idA, Network: "testnet", CurrentWasmHash: "token-hash"}, tokenInterface))
+	require.NoError(t, h.store.Save(ctx, store.Contract{ContractID: idB, Network: "testnet", CurrentWasmHash: "plain-hash"}, plainInterface))
+
+	resp, raw := h.do(t, http.MethodGet, "/api/contracts?network=testnet&implements=sep41", "")
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+
+	var body struct {
+		Contracts []store.Contract `json:"contracts"`
+		Total     int              `json:"total"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &body))
+	require.Equal(t, 1, body.Total)
+	require.Len(t, body.Contracts, 1)
+	assert.Equal(t, idA, body.Contracts[0].ContractID)
+	assert.Equal(t, []string{"sep41"}, body.Contracts[0].Implements)
 }

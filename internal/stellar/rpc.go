@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/stellar/go-stellar-sdk/clients/rpcclient"
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
@@ -45,10 +46,28 @@ func (f *RPCFetcher) Network(ctx context.Context) (string, error) {
 	return resp.Passphrase, nil
 }
 
+// LatestLedger reports the network ledger at the moment of observation.
+func (f *RPCFetcher) LatestLedger(ctx context.Context) (uint32, error) {
+	resp, err := f.client.GetLatestLedger(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("stellar: getLatestLedger: %w", err)
+	}
+	return resp.Sequence, nil
+}
+
 // WasmHash returns the hex hash of the WASM the contract currently executes.
 func (f *RPCFetcher) WasmHash(ctx context.Context, contractID string) (string, error) {
 	hash, err := f.instanceWasmHash(ctx, contractID)
 	if err != nil {
+		if errors.Is(err, ErrNoWasm) {
+			builtin, checkErr := f.isStellarAsset(ctx, contractID)
+			if checkErr != nil {
+				return "", checkErr
+			}
+			if builtin {
+				return BuiltinSACIdentifier, nil
+			}
+		}
 		return "", err
 	}
 	return hex.EncodeToString(hash[:]), nil
@@ -58,6 +77,15 @@ func (f *RPCFetcher) WasmHash(ctx context.Context, contractID string) (string, e
 func (f *RPCFetcher) FetchContract(ctx context.Context, contractID string) (*Contract, error) {
 	hash, err := f.instanceWasmHash(ctx, contractID)
 	if err != nil {
+		if errors.Is(err, ErrNoWasm) {
+			builtin, checkErr := f.isStellarAsset(ctx, contractID)
+			if checkErr != nil {
+				return nil, checkErr
+			}
+			if builtin {
+				return &Contract{ID: contractID, WasmHash: BuiltinSACIdentifier, Builtin: true}, nil
+			}
+		}
 		return nil, err
 	}
 
@@ -125,6 +153,35 @@ func (f *RPCFetcher) instanceWasmHash(ctx context.Context, contractID string) (x
 	return wasmHash, nil
 }
 
+// isStellarAsset checks the instance executable discriminant. An arbitrary
+// executable without WASM must not be mistaken for a Stellar Asset Contract.
+func (f *RPCFetcher) isStellarAsset(ctx context.Context, contractID string) (bool, error) {
+	key, err := instanceLedgerKey(contractID)
+	if err != nil {
+		return false, err
+	}
+	entry, err := f.singleEntry(ctx, key)
+	if err != nil {
+		return false, err
+	}
+	if entry == nil {
+		return false, notFoundError(contractID)
+	}
+
+	var data xdr.LedgerEntryData
+	if err := unmarshalBase64(entry.DataXDR, &data); err != nil {
+		return false, fmt.Errorf("stellar: decoding instance entry for %s: %w", contractID, err)
+	}
+	if data.ContractData == nil {
+		return false, fmt.Errorf("stellar: entry for %s is not contract data", contractID)
+	}
+	instance, ok := data.ContractData.Val.GetInstance()
+	if !ok {
+		return false, fmt.Errorf("stellar: entry for %s holds no contract instance", contractID)
+	}
+	return instance.Executable.Type == xdr.ContractExecutableTypeContractExecutableStellarAsset, nil
+}
+
 // codeByHash reads the contract code entry stored under a WASM hash.
 func (f *RPCFetcher) codeByHash(ctx context.Context, hash xdr.Hash) ([]byte, error) {
 	var key xdr.LedgerKey
@@ -170,12 +227,23 @@ func (f *RPCFetcher) singleEntry(ctx context.Context, key xdr.LedgerKey) (*proto
 
 	resp, err := f.client.GetLedgerEntries(ctx, protocol.GetLedgerEntriesRequest{Keys: []string{encoded}})
 	if err != nil {
+		if isRateLimitError(err) {
+			return nil, fmt.Errorf("stellar: getLedgerEntries: %w: %w", ErrRateLimited, err)
+		}
 		return nil, fmt.Errorf("stellar: getLedgerEntries: %w", err)
 	}
 	if len(resp.Entries) == 0 {
 		return nil, nil
 	}
 	return &resp.Entries[0], nil
+}
+
+func isRateLimitError(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "http status 429") ||
+		strings.Contains(message, "status 429") ||
+		strings.Contains(message, "rate limit") ||
+		strings.Contains(message, "too many requests")
 }
 
 // instanceLedgerKey builds the ledger key of a contract's instance entry.

@@ -1,0 +1,26 @@
+{
+	"name": "SoroVault Development",
+	"image": "mcr.microsoft.com/devcontainers/go:1.26",
+	"features": {
+		"golangci-lint:latest": "true",
+		"node": "22"
+	},
+	"postgres": "local-image",
+	"postgresPassword": "sorovault",
+	"postgresUsername": "sorovault",
+	"postgresDatabase": "sorovault",
+	"postgresPort": 5432,
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"golang.go",
+				"golang.go-debug",
+				"golang.vscode-go",
+				"ms-azuretools.vscode-docker"
+			]
+		}
+	},
+	"forwardPorts": ["5432"],
+	"goForwardCommand": "go mod tidy && go test ./...",
+	"postStartCommand": "go run ./cmd/sorovault migrate"
+}

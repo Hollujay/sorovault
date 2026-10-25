@@ -283,3 +283,23 @@ func TestEnvMetaJSONShape(t *testing.T) {
 	assert.Equal(t, float64(25), got["protocol"])
 	assert.NotContains(t, got, "pre_release", "a zero pre-release number must be omitted")
 }
+
+func TestStellarAssetContractInterface(t *testing.T) {
+	t.Parallel()
+
+	iface := model.StellarAssetContractInterface()
+	require.True(t, iface.Builtin)
+	assert.Equal(t, "https://developers.stellar.org/docs/tokens/stellar-asset-contract", iface.Source)
+	assert.Len(t, iface.Functions, 17)
+
+	transfer, ok := iface.Function("transfer")
+	require.True(t, ok)
+	require.Len(t, transfer.Inputs, 3)
+	assert.Equal(t, model.KindMuxedAddress, transfer.Inputs[1].Type.Kind)
+	assert.Equal(t, "to", transfer.Inputs[1].Name)
+
+	trust, ok := iface.Function("trust")
+	require.True(t, ok)
+	require.Len(t, trust.Inputs, 1)
+	assert.Equal(t, "addr", trust.Inputs[0].Name)
+}

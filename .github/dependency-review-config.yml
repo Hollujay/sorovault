@@ -1,0 +1,84 @@
+# The policy the dependency review applies to every pull request.
+#
+# The workflow hands this file to GitHub's dependency-review action when the
+# repository's dependency graph is enabled, and .github/scripts/dependency-review.sh
+# reads the same file when it is not, so the licences the project accepts are
+# written down once and both paths judge a pull request the same way.
+#
+# A pull request does not get to edit this file to its own advantage: the
+# workflow loads it from the base branch, the same way it loads
+# .github/scripts/malware-scan.sh from the base branch rather than from the
+# pull request being judged.
+
+# A dependency with an advisory of this severity or worse fails the review.
+# Low-severity advisories are still reported, but they do not block: they are
+# common enough that blocking on them teaches maintainers to ignore the check.
+fail-on-severity: moderate
+
+# The scopes the review covers. Go modules are runtime scope; the npm
+# packages under internal/codegen/testdata are development scope, and are
+# reviewed too even though they only ever run in CI. "unknown" is left out
+# on purpose: it is the scope GitHub falls back to when it cannot place a
+# package, and a package it cannot place is a package whose scope we cannot
+# vouch for either.
+fail-on-scopes:
+  - runtime
+  - development
+
+# The dependency graph needs a moment to catch up with a freshly pushed
+# commit. Waiting for it is better than reporting a clean review of a graph
+# that has not been written yet.
+retry-on-snapshot-warnings: true
+
+# Licence policy. SoroVault is Apache-2.0, so the list is the permissive
+# licences that can be redistributed inside an Apache-2.0 project. It covers
+# every licence the dependency graph reports today: Apache-2.0 (cobra, the
+# Stellar SDK, mousetrap), MIT (chi, pgx, testify, lib/pq and most of their
+# dependencies), BSD-2-Clause (pkg/errors) and BSD-3-Clause (pflag,
+# creachadair/jrpc2, creachadair/mds, golang.org/x/*) for the Go modules,
+# ISC for stellar/go-xdr, and Apache-2.0 for @stellar/stellar-sdk and
+# typescript plus MIT for buffer on the npm side.
+#
+# A dual-licensed module is reported as an SPDX expression, and an expression
+# is only satisfied when every licence in it is on the list — so
+# go.yaml.in/yaml/v3, which is "Apache-2.0 AND MIT", is covered by having
+# both halves here.
+#
+# Copyleft and source-available licences (GPL, LGPL, AGPL, MPL, ...) are
+# deliberately absent: a pull request that adds one fails here and needs a
+# maintainer to decide, rather than being merged unnoticed.
+allow-licenses:
+  - Apache-2.0
+  - MIT
+  - BSD-2-Clause
+  - BSD-3-Clause
+  - ISC
+
+# Four Go modules whose licence GitHub cannot classify. The detector matches
+# licence templates against the text of a repository's LICENSE file, and these
+# four all carry enough beyond the standard text to defeat it: golang-migrate
+# keeps an "Original Work / Modified Work" copyright block, lib/pq a
+# "Portions Copyright" line, creachadair/mds a rewritten BSD header, and
+# klauspost/compress a second Apache-2.0 section for the gzhttp files it
+# carries. The graph reports no licence for them, so the action lists them as
+# unlicensed.
+#
+# Their licences were read by hand instead, and all four are already permitted
+# above: golang-migrate/migrate and lib/pq are MIT, creachadair/mds is
+# BSD-3-Clause and klauspost/compress is BSD-3-Clause alongside that Apache-2.0
+# section. Exempting them keeps a package whose licence the detector cannot
+# read from ever resolving to something outside the list.
+#
+# The trade-off is that a licence change inside these four modules would not
+# be caught automatically, so their next version bump still wants a human eye
+# on it. The npm packages need no such exemption: the registry states their
+# licence outright.
+#
+# The fallback review does not need this list: it reads the licences of these
+# four modules itself, and reads them the same way every time, so it holds
+# them to the list above.
+allow-dependencies-licenses:
+  - pkg:golang/github.com/golang-migrate/migrate/v4
+  - pkg:golang/github.com/creachadair/mds
+  - pkg:golang/github.com/klauspost/compress
+  - pkg:golang/github.com/lib/pq

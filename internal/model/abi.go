@@ -20,6 +20,11 @@ const ABIVersion = "1"
 type Interface struct {
 	ABIVersion string `json:"abi_version"`
 
+	// Builtin marks interfaces supplied by the protocol rather than decoded
+	// from uploaded WASM. Source cites the normative interface specification.
+	Builtin bool   `json:"builtin,omitempty"`
+	Source  string `json:"source,omitempty"`
+
 	// Meta holds the contract's build metadata, decoded from the WASM's
 	// "contractmetav0" custom section. Typical keys are "rsver" (the Rust
 	// compiler version) and "rssdkver" (the soroban-sdk version). It is nil

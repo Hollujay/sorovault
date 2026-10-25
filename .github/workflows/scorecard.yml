@@ -1,0 +1,43 @@
+name: Scorecard
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # Weekly, in the middle of the working day for UTC+0
+    - cron: "11 12 * * 1"
+
+# The workflow itself only reads the repository. The analysis job needs the one
+# extra scope to upload SARIF.
+permissions:
+  contents: read
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    permissions:
+      # Required to publish the findings to code scanning.
+      security-events: write
+      # Needed if the workflow publishes a results badge or otherwise needs the
+      # repository metadata for the OpenSSF Scorecard API.
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run OpenSSF Scorecard
+        uses: ossf/scorecard-action@fa7117db83c52d787ae5a89f350999701505d78e # v2.5.0
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+
+      # Upload the results to the repository's code scanning alerts.
+      - name: Upload SARIF file
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          sarif_file: results.sarif
+          # One analysis per category for this commit.
+          category: scorecard
