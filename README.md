@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/soroworks/sorovault/actions/workflows/ci.yml/badge.svg)](https://github.com/soroworks/sorovault/actions/workflows/ci.yml)
 [![Security](https://github.com/soroworks/sorovault/actions/workflows/security.yml/badge.svg)](https://github.com/soroworks/sorovault/actions/workflows/security.yml)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/soroworks/sorovault/badge)](https://api.securityscorecards.dev/projects/github.com/soroworks/sorovault)
 [![Release](https://img.shields.io/github/v/release/soroworks/sorovault)](https://github.com/soroworks/sorovault/releases/latest)
 [![Go](https://img.shields.io/github/go-mod/go-version/soroworks/sorovault)](go.mod)
 [![License](https://img.shields.io/github/license/soroworks/sorovault)](LICENSE)
@@ -191,6 +192,7 @@ All configuration is environment variables. Only `DATABASE_URL` (or the path in 
 | `NETWORK_PASSPHRASE` | `Test SDF Network ; September 2015` | the network you expect `RPC_URL` to serve |
 | `HTTP_ADDR` | `:8080` | listen address |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
+| `LOG_FORMAT` | `text` | `text` for people, `json` for one parseable object per line |
 | `RPC_TIMEOUT` | `30s` | bound on a single contract fetch |
 | `REFRESH_INTERVAL` | `0` (off) | re-check registered contracts this often while serving; minimum `1m` |
 | `REFRESH_WEBHOOK_URL` | — | post a JSON message here whenever a refresh finds an upgraded contract |
@@ -199,6 +201,10 @@ All configuration is environment variables. Only `DATABASE_URL` (or the path in 
 | `REFRESH_EVENTS_INTERVAL` | `10s` | how often new upgrade events are read; minimum `2s` |
 | `SIGNING_KEY` | — | sign interface responses with this Ed25519 key (base64 32-byte seed; or `SIGNING_KEY_FILE`). `sorovault keygen` makes one |
 | `SIGNING_RETIRED_KEYS` | — | comma-separated base64 public keys of earlier signing keys, kept at `GET /api/keys` so old signatures stay verifiable |
+| `RATE_LIMIT_PER_MINUTE` | `30` | registrations and refreshes allowed per client per minute |
+| `RATE_LIMIT_BURST` | `10` | how many of those may arrive at once |
+| `TRUST_X_FORWARDED_FOR` | `false` | use the first `X-Forwarded-For` address as the client; only behind a trusted proxy |
+| `CORS_ORIGINS` | — | comma-separated exact browser origins, or `*` for read-only routes only |
 
 `NETWORK_PASSPHRASE` is a guard, not a source of truth. SoroVault reads the real
 passphrase from the RPC endpoint and refuses to proceed if the two disagree, so
@@ -468,6 +474,7 @@ the same **503**, with the `Retry-After` header, inline on the page.
 | `POST` | `/api/contracts:batch` | register up to 20 contracts in one request — `{"contract_ids": ["C…", "C…"]}` |
 | `POST` | `/api/wasm/{hash}` | catalog uploaded code before a contract runs it |
 | `GET` | `/api/wasm/{hash}` | read a catalogued uploaded-code interface — `?network=` |
+| `GET` | `/api/contracts/{id}` | the decoded ABI — `?network=`, `?wasm_hash=`, `?download=1` |
 | `GET` | `/api/wasm/{hash}/contracts` | every contract running a given WASM — `?network=`, `?ever=`, `?limit=`, `?offset=` |
 | `GET` | `/api/contracts/{id}` | the decoded ABI — `?network=`, `?wasm_hash=` |
 | `PUT` | `/api/contracts/{id}/source` | attach a `source_url` and optional `source_commit` |
@@ -484,6 +491,7 @@ the same **503**, with the `Retry-After` header, inline on the page.
 | `GET` | `/api/upgrades` | recent interface upgrades, newest first — `?network=`, `?limit=`, `?offset=` |
 | `GET` | `/api/upgrades.atom` | the same upgrades as an Atom 1.0 feed |
 | `GET` | `/healthz` | liveness |
+| `GET` | `/readyz` | readiness: checks Postgres and RPC |
 
 `POST /api/contracts` returns **201** when the contract is new and **200** when
 it was already registered, so it is safe to retry. Passing `?wasm_hash=` to a
@@ -614,6 +622,12 @@ GET /api/wasm/c618dae264864ccf446a3c7db27da80c7c83e840131242cc2fe9cd32a2a20781/c
 and have since been upgraded; each result says whether the contract still runs
 it. The contract page links its WASM hash to this listing.
 
+`?download=1` serves a contract's interface as a file rather than a document
+the browser renders — `<contract>.<short-hash>.abi.json` — which is what the
+browse page's download link uses. The file holds the same document the plain
+`GET` returns: the interface, under `interface`, with the contract's metadata
+beside it.
+
 ## CLI
 
 ```console
@@ -632,6 +646,7 @@ sorovault backfill-origins          # find the creator of contracts that lack on
 sorovault claim sign <contract_id>  # sign a publisher claim (--name, --source-url, ...)
 sorovault keygen                    # make an attestation signing key
 sorovault migrate                   # apply schema migrations
+sorovault migrate status            # --json
 sorovault doctor                    # check a deployment's health
 ```
 
@@ -697,6 +712,55 @@ the network. It reads the same configuration as everything else, so a
 deployment missing its `DATABASE_URL` is reported as a configuration error
 rather than a passing check.
 
+### `sorovault migrate status`
+
+Before an upgrade, an operator wants to know what is applied and what is
+pending — without applying anything. `migrate status` says exactly that, and
+nothing more:
+
+```console
+$ sorovault migrate status
+current version: 2
+latest version:  4
+
+pending migrations:
+  VERSION  NAME
+  3        wasm_specs
+  4        contract_source
+```
+
+The version the database has applied, and whether it is dirty, come from
+golang-migrate — the same source `sorovault migrate` applies, so the two
+cannot disagree. The latest version, and the migrations still to come, are
+the ones embedded in this binary. No migration is applied: a status run
+reports and stops there. It does read the database through golang-migrate,
+which creates the migrator's own version table if the database has not been
+migrated yet — nothing else is written. A database role that may only read
+will therefore fail the command; `sorovault doctor` reads the same state
+without writing anything.
+
+The command exits non-zero when migrations are pending, so it can gate a
+deployment. A database marked **dirty** — a migration that failed partway, so
+the schema is in an unknown state — is reported as such, with what to do
+about it, and also exits non-zero.
+
+`--json` emits the same report as JSON, for a gate that reads it rather than
+a person. The `message` says what the report means and what to do about it,
+so a reader of the JSON is told what a reader of the text report is:
+
+```console
+$ sorovault migrate status --json
+{
+  "current_version": 2,
+  "latest_version": 4,
+  "dirty": false,
+  "pending": [
+    { "version": 3, "name": "wasm_specs" },
+    { "version": 4, "name": "contract_source" }
+  ],
+  "message": "2 migration(s) pending; run `sorovault migrate` to apply them"
+}
+```
 ### Shell completion
 
 `sorovault completion bash|zsh|fish|powershell` prints a completion script (this
@@ -986,3 +1050,10 @@ contracts themselves. SoroVault reads chain state; it never sends a transaction.
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
+
+
+## Token standard detection
+
+SoroVault classifies a contract against versioned interface definitions after decoding its interface. The first matcher is SEP-41 Soroban Token Interface [v0.5.2](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0041.md), a draft version pinned by the matcher. Matching requires every required function name, ordered argument type, and return type to match exactly; names alone are not enough. The API accepts repeatable `implements` filters, for example `GET /api/contracts?implements=sep41`, and the browse list shows a badge for detected standards.
+
+Existing registry rows are classified on their next successful registration or refresh. The migration does not infer standards from old JSON rows, so an older contract will not appear in a standard-filtered listing until refreshed.

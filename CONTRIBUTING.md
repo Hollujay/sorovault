@@ -7,6 +7,8 @@ document is about how to get moving quickly.
 ## Getting set up
 
 You need Go **1.25** (the Stellar SDK requires it) and Docker for the database.
+Alternatively, use the included dev container which provides Go, Node, golangci-lint,
+and a Postgres service with TEST_DATABASE_URL set.
 
 ```console
 $ git clone https://github.com/soroworks/sorovault && cd sorovault

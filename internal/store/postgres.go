@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/soroworks/sorovault/internal/model"
+	"github.com/soroworks/sorovault/internal/spec"
 )
 
 // Postgres is the Store backed by a Postgres database.
@@ -52,6 +53,14 @@ func Ping(ctx context.Context, databaseURL string) error {
 	defer pool.Close()
 
 	if err := pool.Ping(ctx); err != nil {
+		return fmt.Errorf("store: pinging postgres: %w", err)
+	}
+	return nil
+}
+
+// Ping reports whether the database still answers, without changing it.
+func (p *Postgres) Ping(ctx context.Context) error {
+	if err := p.pool.Ping(ctx); err != nil {
 		return fmt.Errorf("store: pinging postgres: %w", err)
 	}
 	return nil
@@ -113,6 +122,7 @@ func (p *Postgres) Save(ctx context.Context, c Contract, iface *model.Interface)
 	if err != nil {
 		return fmt.Errorf("store: encoding interface: %w", err)
 	}
+	c.Implements = spec.ImplementedStandards(iface)
 
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {
@@ -124,15 +134,16 @@ func (p *Postgres) Save(ctx context.Context, c Contract, iface *model.Interface)
 	// most recent successful fetch. Saving an interface means the contract
 	// was live, so a missing mark is cleared.
 	const upsertContract = `
-		INSERT INTO contracts (network, contract_id, current_wasm_hash, name, first_seen, last_refreshed)
-		VALUES ($1, $2, $3, $4, now(), now())
+		INSERT INTO contracts (network, contract_id, current_wasm_hash, name, implements, first_seen, last_refreshed)
+		VALUES ($1, $2, $3, $4, $5, now(), now())
 		ON CONFLICT (network, contract_id) DO UPDATE SET
 			current_wasm_hash = EXCLUDED.current_wasm_hash,
 			name              = CASE WHEN EXCLUDED.name <> '' THEN EXCLUDED.name ELSE contracts.name END,
+			implements        = EXCLUDED.implements,
 			last_refreshed    = now(),
 			missing_since     = NULL`
 
-	if _, err := tx.Exec(ctx, upsertContract, c.Network, c.ContractID, c.CurrentWasmHash, c.Name); err != nil {
+	if _, err := tx.Exec(ctx, upsertContract, c.Network, c.ContractID, c.CurrentWasmHash, c.Name, c.Implements); err != nil {
 		return fmt.Errorf("store: saving contract %s: %w", c.ContractID, err)
 	}
 
@@ -159,7 +170,7 @@ func (p *Postgres) Save(ctx context.Context, c Contract, iface *model.Interface)
 // GetContract returns one contract's current state.
 func (p *Postgres) GetContract(ctx context.Context, network, contractID string) (*Contract, error) {
 	const q = `
-		SELECT network, contract_id, current_wasm_hash, name, source_url, source_commit, first_seen, last_refreshed, missing_since,
+		SELECT network, contract_id, current_wasm_hash, name, source_url, source_commit, first_seen, last_refreshed, missing_since, implements,
 		       creator, created_ledger, verified_by, verified_at, verified_wasm_hash
 		FROM contracts
 		WHERE network = $1 AND contract_id = $2`
@@ -167,7 +178,7 @@ func (p *Postgres) GetContract(ctx context.Context, network, contractID string) 
 	var c Contract
 	err := p.pool.QueryRow(ctx, q, network, contractID).Scan(
 		&c.Network, &c.ContractID, &c.CurrentWasmHash, &c.Name, &c.SourceURL, &c.SourceCommit,
-		&c.FirstSeen, &c.LastRefreshed, &c.MissingSince,
+		&c.FirstSeen, &c.LastRefreshed, &c.MissingSince, &c.Implements,
 		&c.Creator, &c.CreatedLedger, &c.VerifiedBy, &c.VerifiedAt, &c.VerifiedWasmHash,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -438,7 +449,7 @@ func (p *Postgres) ListContracts(ctx context.Context, f ListFilter) (*ContractPa
 	const q = `
 		WITH matched AS (
 			SELECT c.network, c.contract_id, c.current_wasm_hash, c.name, c.source_url, c.source_commit,
-			       c.first_seen, c.last_refreshed, c.missing_since,
+			       c.first_seen, c.last_refreshed, c.missing_since, c.implements,
 			       c.creator, c.created_ledger, c.verified_by, c.verified_at, c.verified_wasm_hash,
 			       COALESCE(s.symbols, '') AS symbols
 			FROM contracts c
@@ -468,15 +479,16 @@ func (p *Postgres) ListContracts(ctx context.Context, f ListFilter) (*ContractPa
 			          UNION ALL
 			          SELECT 1 FROM jsonb_array_elements(COALESCE(s.spec->'types'->'error_enums', '[]'::jsonb)) AS t
 			          WHERE t->>'name' = want.name))
+			  AND (COALESCE(cardinality($5::text[]), 0) = 0 OR c.implements @> $5::text[])
 		)
 		SELECT network, contract_id, current_wasm_hash, name, source_url, source_commit, first_seen, last_refreshed,
-		       missing_since, creator, created_ledger, verified_by, verified_at, verified_wasm_hash,
+		       missing_since, implements, creator, created_ledger, verified_by, verified_at, verified_wasm_hash,
 		       symbols, count(*) OVER () AS total
 		FROM matched
 		ORDER BY last_refreshed DESC, contract_id
-		LIMIT $5 OFFSET $6`
+		LIMIT $6 OFFSET $7`
 
-	rows, err := p.pool.Query(ctx, q, f.Network, escapeLike(f.Query), f.Functions, f.Types, f.Limit, f.Offset)
+	rows, err := p.pool.Query(ctx, q, f.Network, escapeLike(f.Query), f.Functions, f.Types, f.Implements, f.Limit, f.Offset)
 	if err != nil {
 		return nil, fmt.Errorf("store: listing contracts: %w", err)
 	}
@@ -489,7 +501,7 @@ func (p *Postgres) ListContracts(ctx context.Context, f ListFilter) (*ContractPa
 		var total int
 		if err := rows.Scan(
 			&c.Network, &c.ContractID, &c.CurrentWasmHash, &c.Name, &c.SourceURL, &c.SourceCommit,
-			&c.FirstSeen, &c.LastRefreshed, &c.MissingSince,
+			&c.FirstSeen, &c.LastRefreshed, &c.MissingSince, &c.Implements,
 			&c.Creator, &c.CreatedLedger, &c.VerifiedBy, &c.VerifiedAt, &c.VerifiedWasmHash,
 			&symbols, &total,
 		); err != nil {
@@ -801,10 +813,11 @@ func (p *Postgres) countContracts(ctx context.Context, f ListFilter) (int, error
 		          WHERE t->>'name' = want.name
 		          UNION ALL
 		          SELECT 1 FROM jsonb_array_elements(COALESCE(s.spec->'types'->'error_enums', '[]'::jsonb)) AS t
-		          WHERE t->>'name' = want.name))`
+		          WHERE t->>'name' = want.name))
+		  AND (COALESCE(cardinality($5::text[]), 0) = 0 OR c.implements @> $5::text[])`
 
 	var total int
-	if err := p.pool.QueryRow(ctx, q, f.Network, escapeLike(f.Query), f.Functions, f.Types).Scan(&total); err != nil {
+	if err := p.pool.QueryRow(ctx, q, f.Network, escapeLike(f.Query), f.Functions, f.Types, f.Implements).Scan(&total); err != nil {
 		return 0, fmt.Errorf("store: counting contracts: %w", err)
 	}
 	return total, nil

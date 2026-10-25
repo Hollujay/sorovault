@@ -8,16 +8,20 @@ import (
 	"log/slog"
 	"net/http"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/cors"
 	"github.com/spf13/cobra"
 
 	"github.com/soroworks/sorovault/internal/api"
+	"github.com/soroworks/sorovault/internal/config"
 	"github.com/soroworks/sorovault/internal/refresher"
 	"github.com/soroworks/sorovault/internal/registry"
 	"github.com/soroworks/sorovault/internal/stellar"
+	"github.com/soroworks/sorovault/internal/store"
 	"github.com/soroworks/sorovault/internal/web"
 )
 
@@ -50,7 +54,7 @@ func newServeCmd() *cobra.Command {
 				// never left writing to a closed pool.
 				defer stopRefresh()
 
-				handler, err := newRouter(a.registry, a.log, refresh, a.configureAPI)
+				handler, err := newRouter(a.registry, a.log, refresh, a.cfg)
 				if err != nil {
 					return err
 				}
@@ -62,16 +66,6 @@ func newServeCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&addr, "addr", "", "listen address (overrides HTTP_ADDR)")
 	return cmd
-}
-
-// configureAPI applies the settings that only exist in a deployment to the
-// API: the interface-signing key, if one is configured.
-func (a *app) configureAPI(server *api.Server) {
-	if a.cfg.Signer == nil {
-		return
-	}
-	server.SetSigner(a.cfg.Signer, a.cfg.RetiredSigningKeys...)
-	a.log.Info("signing interface responses", "key_id", a.cfg.Signer.KeyID())
 }
 
 // startRefresher runs automatic refresh in the background when
@@ -144,11 +138,18 @@ func refreshNotifier(a *app) (refresher.Notifier, error) {
 	return webhook, nil
 }
 
-// newRouter assembles the JSON API, the browse UI and the health endpoint
+// newRouter assembles the JSON API, the browse UI and the health endpoints
 // into one handler. refresh may be nil when automatic refresh is off; the
-// statistics endpoint then has no sweep to report. configure, when set, runs
-// on the API server before its routes are built.
-func newRouter(reg *registry.Registry, log *slog.Logger, refresh *refresher.Refresher, configure ...func(*api.Server)) (http.Handler, error) {
+// statistics endpoint then has no sweep to report.
+//
+// cfg may be omitted or nil in tests, which leaves CORS and rate limiting
+// off and uses the readiness probe's own defaults.
+func newRouter(reg *registry.Registry, log *slog.Logger, refresh *refresher.Refresher, configs ...*config.Config) (http.Handler, error) {
+	var cfg *config.Config
+	if len(configs) > 0 {
+		cfg = configs[0]
+	}
+
 	ui, err := web.NewServer(reg, log)
 	if err != nil {
 		return nil, err
@@ -158,18 +159,153 @@ func newRouter(reg *registry.Registry, log *slog.Logger, refresh *refresher.Refr
 	if refresh != nil {
 		server.SetLastSweep(refresh.LastSweep)
 	}
-	for _, fn := range configure {
-		fn(server)
+	if cfg != nil {
+		server.SetRateLimit(api.RateLimitOptions{
+			PerMinute:          cfg.RateLimitPerMinute,
+			Burst:              cfg.RateLimitBurst,
+			TrustXForwardedFor: cfg.TrustXForwardedFor,
+		})
+	}
+	if cfg != nil && cfg.Signer != nil {
+		server.SetSigner(cfg.Signer, cfg.RetiredSigningKeys...)
+		log.Info("signing interface responses", "key_id", cfg.Signer.KeyID())
 	}
 
 	r := chi.NewRouter()
+	if cfg != nil {
+		if middleware := corsMiddleware(cfg.CORSOrigins); middleware != nil {
+			r.Use(middleware)
+		}
+	}
 	r.Use(api.Middleware(log)...)
 
+	readiness := newReadinessProbe(reg.Store(), reg.CheckNetwork)
 	r.Get("/healthz", healthz)
+	r.Get("/readyz", readiness.handle)
 	r.Mount("/api", server.Routes())
 	r.Mount("/", ui.Routes())
 
 	return http.TimeoutHandler(r, requestTimeout, `{"error":"request timed out"}`), nil
+}
+
+// corsMiddleware builds the opt-in CORS layer. It returns nil when no
+// origins are configured, so an unconfigured server sends no CORS headers.
+//
+// A wildcard is restricted to read-only methods. GET responses are public
+// registry data, so any origin may read them; the POST routes spend RPC
+// calls and database writes on the caller's behalf, so a wildcard must never
+// open them. An explicit allowlist may use the write methods because the
+// operator has named the clients they trust.
+func corsMiddleware(origins []string) func(http.Handler) http.Handler {
+	if len(origins) == 0 {
+		return nil
+	}
+
+	methods := []string{
+		http.MethodGet, http.MethodHead, http.MethodOptions,
+		http.MethodPost, http.MethodPut,
+	}
+	if len(origins) == 1 && origins[0] == "*" {
+		methods = []string{http.MethodGet, http.MethodHead, http.MethodOptions}
+	}
+
+	return cors.Handler(cors.Options{
+		AllowedOrigins: origins,
+		AllowedMethods: methods,
+		ExposedHeaders: []string{"Retry-After"},
+		MaxAge:         int((5 * time.Minute).Seconds()),
+	})
+}
+
+// readinessCacheTTL is how long a readiness answer is reused. A probe runs
+// often, so this keeps it from adding load to Postgres and RPC while still
+// noticing a dependency that has been down for more than a few seconds.
+const readinessCacheTTL = 5 * time.Second
+
+// readinessCheckTimeout bounds one dependency check, independently of the
+// other, so a hanging database cannot hide the state of RPC.
+const readinessCheckTimeout = 5 * time.Second
+
+// readinessProbe checks the dependencies an instance cannot serve without.
+type readinessProbe struct {
+	store        store.Store
+	checkNetwork func(context.Context) error
+	ttl          time.Duration
+	now          func() time.Time
+
+	mu        sync.Mutex
+	cached    readinessResponse
+	checkedAt time.Time
+	hasCache  bool
+}
+
+type readinessResponse struct {
+	Status  string            `json:"status"`
+	Version string            `json:"version"`
+	Checks  map[string]string `json:"checks"`
+}
+
+func newReadinessProbe(s store.Store, checkNetwork func(context.Context) error) *readinessProbe {
+	return &readinessProbe{
+		store:        s,
+		checkNetwork: checkNetwork,
+		ttl:          readinessCacheTTL,
+		now:          time.Now,
+	}
+}
+
+// handle serves GET /readyz. Unlike /healthz, it answers "can this instance
+// serve?" and is meant for a load balancer or scheduler to take a broken
+// instance out of rotation.
+func (p *readinessProbe) handle(w http.ResponseWriter, r *http.Request) {
+	report, ready := p.report(r.Context())
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	status := http.StatusOK
+	if !ready {
+		status = http.StatusServiceUnavailable
+	}
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(report)
+}
+
+func (p *readinessProbe) report(ctx context.Context) (readinessResponse, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	now := p.now()
+	if p.hasCache && p.ttl > 0 && now.Sub(p.checkedAt) < p.ttl {
+		return p.cached, p.cached.Status == "ok"
+	}
+
+	checks := map[string]string{
+		"database": p.check(ctx, p.store.Ping),
+		"rpc":      p.check(ctx, p.checkNetwork),
+	}
+	status := "ok"
+	if checks["database"] != "ok" || checks["rpc"] != "ok" {
+		status = "unavailable"
+	}
+
+	report := readinessResponse{Status: status, Version: version, Checks: checks}
+	p.cached = report
+	p.checkedAt = now
+	p.hasCache = true
+	return report, status == "ok"
+}
+
+func (p *readinessProbe) check(ctx context.Context, fn func(context.Context) error) string {
+	checkCtx, cancel := context.WithTimeout(ctx, readinessCheckTimeout)
+	defer cancel()
+
+	if err := fn(checkCtx); err != nil {
+		if checkCtx.Err() != nil && checkCtx.Err() == context.DeadlineExceeded {
+			return "timed out"
+		}
+		return err.Error()
+	}
+	return "ok"
 }
 
 // healthz reports process liveness. It deliberately does not touch the

@@ -94,6 +94,7 @@ type contractResponse struct {
 	Network      string     `json:"network"`
 	WasmHash     string     `json:"wasm_hash"`
 	Name         string     `json:"name,omitempty"`
+	Implements   []string   `json:"implements"`
 	SourceURL    string     `json:"source_url,omitempty"`
 	SourceCommit string     `json:"source_commit,omitempty"`
 	FirstSeen    time.Time  `json:"first_seen"`

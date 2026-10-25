@@ -82,6 +82,10 @@ type Contract struct {
 	// again.
 	MissingSince *time.Time `json:"missing_since,omitempty"`
 
+	// Implements lists the standard interface IDs detected from the current
+	// decoded interface, such as "sep41".
+	Implements []string `json:"implements,omitempty"`
+
 	// Matches lists the interface symbols — functions, types, events — that
 	// a search query matched. It is only set on search results, and is
 	// empty when the query matched the contract ID or name instead.
@@ -238,6 +242,8 @@ type ListFilter struct {
 	// Types restricts results to contracts whose current interface declares
 	// a user-defined type with exactly this name. Every name must match.
 	Types []string
+	// Implements restricts results to contracts implementing every listed standard ID.
+	Implements []string
 	// Limit is the maximum number of rows to return. Zero means
 	// DefaultLimit; anything above MaxLimit is clamped to MaxLimit.
 	Limit int
@@ -263,6 +269,7 @@ func (f *ListFilter) Normalize() {
 	f.Query = strings.ReplaceAll(f.Query, "\x00", "\uFFFD")
 	f.Functions = cleanNames(f.Functions)
 	f.Types = cleanNames(f.Types)
+	f.Implements = cleanNames(f.Implements)
 	if f.Limit <= 0 {
 		f.Limit = DefaultLimit
 	}
@@ -286,6 +293,19 @@ func cleanNames(names []string) []string {
 		out = append(out, name)
 	}
 	return out
+}
+
+func hasAllStandards(have, want []string) bool {
+	present := make(map[string]struct{}, len(have))
+	for _, id := range have {
+		present[id] = struct{}{}
+	}
+	for _, id := range want {
+		if _, ok := present[id]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // ContractPage is one page of a contract listing.
@@ -510,6 +530,10 @@ type Store interface {
 
 	// ListVersions returns every stored version of a contract, newest first.
 	ListVersions(ctx context.Context, network, contractID string) ([]SpecVersion, error)
+
+	// Ping reports whether the store's backing service answers. Readiness
+	// uses it; it must not change any stored data.
+	Ping(ctx context.Context) error
 
 	// Close releases any resources held by the store.
 	Close() error

@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/soroworks/sorovault/internal/model"
+	"github.com/soroworks/sorovault/internal/spec"
 	"github.com/soroworks/sorovault/internal/store"
 )
 
@@ -91,6 +92,18 @@ func iface(fnName string) *model.Interface {
 	}
 }
 
+func standardInterface() *model.Interface {
+	functions := make([]model.Function, 0, len(spec.SEP41.Functions))
+	for _, required := range spec.SEP41.Functions {
+		inputs := make([]model.Param, 0, len(required.Inputs))
+		for i, typ := range required.Inputs {
+			inputs = append(inputs, model.Param{Name: string(rune('a' + i)), Type: typ})
+		}
+		functions = append(functions, model.Function{Name: required.Name, Inputs: inputs, Outputs: append([]model.Type(nil), required.Outputs...)})
+	}
+	return &model.Interface{ABIVersion: model.ABIVersion, Functions: functions}
+}
+
 func contract(id, network, hash string) store.Contract {
 	return store.Contract{ContractID: id, Network: network, CurrentWasmHash: hash}
 }
@@ -101,6 +114,19 @@ const (
 )
 
 func runStoreSuite(t *testing.T, newStore factory) {
+	t.Run("filters by exact implemented standard", func(t *testing.T) {
+		s := newStore(t)
+		ctx := context.Background()
+		require.NoError(t, s.Save(ctx, contract(idA, "testnet", "token-hash"), standardInterface()))
+		require.NoError(t, s.Save(ctx, contract(idB, "testnet", "plain-hash"), iface("transfer")))
+
+		page, err := s.ListContracts(ctx, store.ListFilter{Implements: []string{"sep41"}})
+		require.NoError(t, err)
+		require.Equal(t, 1, page.Total)
+		require.Len(t, page.Contracts, 1)
+		assert.Equal(t, idA, page.Contracts[0].ContractID)
+		assert.Equal(t, []string{"sep41"}, page.Contracts[0].Implements)
+	})
 	t.Run("catalogued wasm does not require a contract", func(t *testing.T) {
 		s := newStore(t)
 		ctx := context.Background()

@@ -26,6 +26,23 @@
         }
       }
     },
+    "/readyz": {
+      "get": {
+        "summary": "Readiness",
+        "description": "Checks Postgres and the configured RPC network. Answers are cached for a few seconds. Unlike /healthz, a failure means this instance cannot serve and should be taken out of rotation.",
+        "operationId": "readyz",
+        "responses": {
+          "200": {
+            "description": "The database answers and the RPC endpoint serves the configured network.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Readiness" }, "examples": { "ready": { "$ref": "#/components/examples/Readiness" } } } }
+          },
+          "503": {
+            "description": "At least one dependency is failing; `checks` names each one and carries its error.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Readiness" }, "examples": { "not_ready": { "$ref": "#/components/examples/NotReady" } } } }
+          }
+        }
+      }
+    },
     "/api/contracts": {
       "get": {
         "summary": "List or search contracts",
@@ -34,6 +51,7 @@
           { "name": "q", "in": "query", "description": "Case-insensitive substring of the contract ID, its name, or a function, type or event name in its current interface.", "schema": { "type": "string" } },
           { "name": "function", "in": "query", "description": "Only contracts whose current interface declares a function with exactly this name. Repeatable; every name must match. Case-sensitive.", "schema": { "type": "array", "items": { "type": "string" } }, "style": "form", "explode": true },
           { "name": "type", "in": "query", "description": "Only contracts whose current interface declares a user-defined type with exactly this name. Repeatable; every name must match. Case-sensitive.", "schema": { "type": "array", "items": { "type": "string" } }, "style": "form", "explode": true },
+          { "name": "implements", "in": "query", "description": "Only contracts implementing every listed standard interface ID, such as sep41. Repeatable.", "schema": { "type": "array", "items": { "type": "string" } }, "style": "form", "explode": true },
           { "$ref": "#/components/parameters/network" },
           { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 } },
           { "name": "offset", "in": "query", "schema": { "type": "integer", "minimum": 0, "default": 0 } }
@@ -62,6 +80,7 @@
           "400": { "$ref": "#/components/responses/BadRequest" },
           "404": { "$ref": "#/components/responses/NotFound" },
           "422": { "$ref": "#/components/responses/NoInterface" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
           "503": { "$ref": "#/components/responses/ServiceUnavailable" }
         }
       }
@@ -93,7 +112,8 @@
         "parameters": [
           { "$ref": "#/components/parameters/id" },
           { "$ref": "#/components/parameters/network" },
-          { "$ref": "#/components/parameters/wasmHash" }
+          { "$ref": "#/components/parameters/wasmHash" },
+          { "name": "download", "in": "query", "description": "A non-empty value sets Content-Disposition: attachment, so the interface is saved as <contract>.<short-hash>.abi.json.", "schema": { "type": "string" } }
         ],
         "responses": {
           "200": { "description": "The interface. When the registry signs, the response carries `X-SoroVault-Attestation` and `X-SoroVault-Key-Id` headers.", "headers": { "X-SoroVault-Attestation": { "$ref": "#/components/headers/Attestation" }, "X-SoroVault-Key-Id": { "$ref": "#/components/headers/KeyId" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ContractInterface" }, "examples": { "zkvote": { "$ref": "#/components/examples/ContractInterface" } } } } },
@@ -285,6 +305,7 @@
           "400": { "$ref": "#/components/responses/BadRequest" },
           "404": { "$ref": "#/components/responses/NotFound" },
           "422": { "$ref": "#/components/responses/NoInterface" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
           "503": { "$ref": "#/components/responses/ServiceUnavailable" }
         }
       }
@@ -298,7 +319,7 @@
           { "$ref": "#/components/parameters/id" },
           { "$ref": "#/components/parameters/network" },
           { "$ref": "#/components/parameters/wasmHash" },
-          { "name": "download", "in": "query", "description": "Any value sets Content-Disposition: attachment.", "schema": { "type": "string" } }
+          { "name": "download", "in": "query", "description": "A non-empty value sets Content-Disposition: attachment.", "schema": { "type": "string" } }
         ],
         "responses": {
           "200": { "description": "TypeScript source.", "content": { "text/plain": { "schema": { "type": "string" }, "example": "export const contractId = \\\"CDZZXVGUCLBUTE3WDD6TF2NXPTBPOYTVPPBBIZMSPVIQLUG226XJ4PAN\\\";\\nexport const wasmHash = \\\"c618dae264864ccf446a3c7db27da80c7c83e840131242cc2fe9cd32a2a20781\\\";\\n" } } },
@@ -370,6 +391,13 @@
       "BadRequest": { "description": "Malformed input, such as an invalid contract ID.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
       "NotFound": { "description": "No such contract, version or function.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
       "NoInterface": { "description": "The contract exists but has no interface to serve: a Stellar asset contract, or a module without a contractspecv0 section.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "TooManyRequests": {
+        "description": "The client has exceeded the configured rate limit for registrations and refreshes. The response carries a Retry-After header saying how long to wait before trying again.",
+        "headers": {
+          "Retry-After": { "description": "Seconds to wait before retrying.", "schema": { "type": "integer", "minimum": 1 } }
+        },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      },
       "ServiceUnavailable": {
         "description": "The request could not be served now. Either the RPC endpoint serves a different network than NETWORK_PASSPHRASE, or the registry is already registering as many contracts as it is allowed to. In the second case the response carries a Retry-After header saying how long to wait before trying again.",
         "headers": {
@@ -380,6 +408,8 @@
     },
     "examples": {
       "Liveness": { "value": { "status": "ok", "version": "dev" } },
+      "Readiness": { "value": { "status": "ok", "version": "dev", "checks": { "database": "ok", "rpc": "ok" } } },
+      "NotReady": { "value": { "status": "unavailable", "version": "dev", "checks": { "database": "connection refused", "rpc": "ok" } } },
       "Stats": { "value": {
         "networks": [
           { "network": "public", "contracts": 42, "versions": 57 },
@@ -556,6 +586,17 @@
       } }
     },
     "schemas": {
+      "Readiness": {
+        "type": "object",
+        "description": "A readiness answer. `checks` contains one entry per dependency: database and rpc.",
+        "properties": {
+          "status": { "type": "string", "enum": ["ok", "unavailable"] },
+          "version": { "type": "string" },
+          "checks": { "type": "object", "additionalProperties": { "type": "string" } }
+        },
+        "required": ["status", "version", "checks"],
+        "additionalProperties": false
+      },
       "NetworkStats": {
         "type": "object",
         "properties": {
@@ -630,7 +671,8 @@
           "verified_by": { "type": "string", "description": "The account whose signed claim verified the publisher. Absent for an unverified contract." },
           "verified_at": { "type": "string", "format": "date-time" },
           "verified_wasm_hash": { "$ref": "#/components/schemas/WasmHash" },
-          "matches": { "type": "array", "items": { "type": "string" }, "description": "Interface symbols a search query matched. Only present on search results." }
+          "matches": { "type": "array", "items": { "type": "string" }, "description": "Interface symbols a search query matched. Only present on search results." },
+          "implements": { "type": "array", "items": { "type": "string" }, "description": "Standard interface IDs detected from the current contract interface." }
         },
         "required": ["contract_id", "network", "current_wasm_hash", "first_seen", "last_refreshed"]
       },
@@ -802,9 +844,10 @@
             "required": ["publisher", "verified_at", "wasm_hash", "current"]
           },
           "current": { "type": "boolean", "description": "False when an older version was requested with wasm_hash." },
+          "implements": { "type": "array", "items": { "type": "string" }, "description": "Standard interface IDs detected from the current contract interface." },
           "interface": { "$ref": "#/components/schemas/Interface" }
         },
-        "required": ["contract_id", "network", "wasm_hash", "first_seen", "decoded_at", "origin", "current", "interface"]
+        "required": ["contract_id", "network", "wasm_hash", "first_seen", "decoded_at", "origin", "current", "implements", "interface"]
       },
       "FunctionDetail": {
         "type": "object",

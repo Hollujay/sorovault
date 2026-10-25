@@ -117,6 +117,35 @@ func TestOpenAPIDocumentsTheABIKinds(t *testing.T) {
 	}
 }
 
+// TestOpenAPIDocumentsTheDownloadParameter proves the parameter that turns a
+// response into a file is documented, not just the route that accepts it.
+//
+// The routes test above cannot catch this: a document that lists the route
+// but not the parameter is still a valid OpenAPI document.
+func TestOpenAPIDocumentsTheDownloadParameter(t *testing.T) {
+	t.Parallel()
+
+	paths := fetchSpec(t)["paths"].(map[string]any)
+
+	for _, path := range []string{"/api/contracts/{id}", "/api/contracts/{id}/client.ts"} {
+		t.Run(path, func(t *testing.T) {
+			operation := paths[path].(map[string]any)["get"].(map[string]any)
+			params := operation["parameters"].([]any)
+
+			var found bool
+			for _, p := range params {
+				param := p.(map[string]any)
+				if param["name"] == "download" {
+					found = true
+					assert.Equal(t, "query", param["in"], "the parameter is a query parameter")
+					assert.NotEmpty(t, param["description"], "the parameter should say what it does")
+				}
+			}
+			assert.True(t, found, "openapi.json must document the download parameter of "+path)
+		})
+	}
+}
+
 func sortedKeys(m map[string]bool) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {

@@ -29,5 +29,12 @@ USER sorovault
 
 EXPOSE 8080
 
+# The image needs no extra tooling for this: Alpine's busybox ships wget. The
+# probe deliberately targets 127.0.0.1, which is the address the Compose stack
+# binds (":8080") — a healthcheck that went out through the published port
+# would depend on the Docker proxy rather than on the process itself.
+HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=5 \
+    CMD wget -qO- http://127.0.0.1:8080/healthz || exit 1
+
 ENTRYPOINT ["sorovault"]
 CMD ["serve"]

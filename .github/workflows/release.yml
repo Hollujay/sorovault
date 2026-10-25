@@ -4,18 +4,23 @@ on:
   push:
     tags: ["v*"]
 
+# Reading the code under test only; the release job asks for write itself.
 permissions:
-  contents: write
-  # Push ghcr.io/soroworks/sorovault:<version> and :latest.
-  packages: write
-  # Sign the build-provenance attestations with Sigstore.
-  id-token: write
-  attestations: write
-  artifact-metadata: write
+  contents: read
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    # Creating the GitHub release, pushing the image and signing the
+    # attestations are the only writes.
+    permissions:
+      contents: write
+      # Push ghcr.io/soroworks/sorovault:<version> and :latest.
+      packages: write
+      # Sign the build-provenance attestations with Sigstore.
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     # The same Postgres CI uses, so the store suite runs before a release
     # rather than skipping.
     services:
@@ -33,12 +38,12 @@ jobs:
           --health-timeout 3s
           --health-retries 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # GoReleaser builds the changelog from history since the last tag.
           fetch-depth: 0
 
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.26"
           cache: true
@@ -52,20 +57,20 @@ jobs:
         run: go test ./...
 
       # GoReleaser builds the linux/arm64 image on an amd64 runner.
-      - uses: docker/setup-qemu-action@v4
-      - uses: docker/setup-buildx-action@v4
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Install Syft
-        uses: anchore/sbom-action/download-syft@v0
+        uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
 
       - name: Log in to GHCR
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: goreleaser/goreleaser-action@v7
+      - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
           distribution: goreleaser
           version: "~> v2"
@@ -74,7 +79,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Attest release artifacts
-        uses: actions/attest-build-provenance@v4
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
             dist/*.tar.gz

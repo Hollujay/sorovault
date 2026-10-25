@@ -209,6 +209,8 @@
 <p class="jsonfoot">
   Full ABI as JSON:
   <a class="mono" href="/api/contracts/{{.Contract.ContractID}}?network={{.Contract.Network}}&amp;wasm_hash={{.Spec.WasmHash}}">/api/contracts/{{short .Contract.ContractID 12}}</a>
+  · Download:
+  <a class="mono" href="/api/contracts/{{.Contract.ContractID}}?network={{.Contract.Network}}&amp;wasm_hash={{.Spec.WasmHash}}&amp;download=1">{{abiFilename .Contract.ContractID .Spec.WasmHash}}</a>
   · Typed client:
   <a href="/api/contracts/{{.Contract.ContractID}}/client.ts?network={{.Contract.Network}}&amp;wasm_hash={{.Spec.WasmHash}}&amp;download=1">TypeScript</a>
 </p>

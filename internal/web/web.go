@@ -19,6 +19,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/soroworks/sorovault/internal/api"
 	"github.com/soroworks/sorovault/internal/model"
 	"github.com/soroworks/sorovault/internal/registry"
 	"github.com/soroworks/sorovault/internal/spec"
@@ -511,6 +512,10 @@ func funcs() template.FuncMap {
 			}
 			return s[:n] + "…"
 		},
+		// abiFilename is the API's own rule for naming a downloaded
+		// interface, so the page cannot promise a file name the response
+		// header does not use.
+		"abiFilename": api.ABIFilename,
 		"hasTypes": func(t model.Types) bool {
 			return len(t.Structs)+len(t.Unions)+len(t.Enums)+len(t.ErrorEnums) > 0
 		},

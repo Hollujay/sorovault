@@ -2,9 +2,11 @@ package config_test
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,10 +25,11 @@ func setEnv(t *testing.T, vars map[string]string) {
 
 	for _, key := range []string{
 		"RPC_URL", "NETWORK_PASSPHRASE", "DATABASE_URL", "DATABASE_URL_FILE",
-		"HTTP_ADDR", "LOG_LEVEL", "RPC_TIMEOUT", "REFRESH_INTERVAL",
+		"HTTP_ADDR", "LOG_LEVEL", "LOG_FORMAT", "RPC_TIMEOUT", "REFRESH_INTERVAL",
 		"MAX_CONCURRENT_REGISTRATIONS", "REFRESH_WEBHOOK_URL",
 		"REFRESH_WEBHOOK_SECRET", "REFRESH_EVENTS", "REFRESH_EVENTS_INTERVAL",
 		"SIGNING_KEY", "SIGNING_KEY_FILE", "SIGNING_RETIRED_KEYS",
+		"CORS_ORIGINS", "RATE_LIMIT_PER_MINUTE", "RATE_LIMIT_BURST", "TRUST_X_FORWARDED_FOR",
 	} {
 		if v, ok := vars[key]; ok {
 			t.Setenv(key, v)
@@ -47,10 +50,15 @@ func TestLoadDefaults(t *testing.T) {
 	assert.Equal(t, config.DefaultHTTPAddr, cfg.HTTPAddr)
 	assert.Equal(t, testDatabaseURL, cfg.DatabaseURL)
 	assert.Equal(t, slog.LevelInfo, cfg.LogLevel)
+	assert.Equal(t, config.LogFormatText, cfg.LogFormat)
 	assert.Equal(t, config.DefaultRPCTimeout, cfg.RPCTimeout)
 	assert.Zero(t, cfg.RefreshInterval, "automatic refresh is opt-in")
 	assert.Zero(t, cfg.MaxConcurrentRegistrations,
 		"the concurrency limit is left to the registry unless it is configured")
+	assert.Empty(t, cfg.CORSOrigins, "CORS is opt-in")
+	assert.Equal(t, config.DefaultRateLimitPerMinute, cfg.RateLimitPerMinute)
+	assert.Equal(t, config.DefaultRateLimitBurst, cfg.RateLimitBurst)
+	assert.False(t, cfg.TrustXForwardedFor)
 }
 
 func TestLoadOverrides(t *testing.T) {
@@ -222,6 +230,181 @@ func TestLogLevels(t *testing.T) {
 	}
 }
 
+func TestLogFormat(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{"text", config.LogFormatText},
+		{"json", config.LogFormatJSON},
+		{"JSON", config.LogFormatJSON},
+		{"  Text  ", config.LogFormatText},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			setEnv(t, map[string]string{"DATABASE_URL": testDatabaseURL, "LOG_FORMAT": tt.in})
+
+			cfg, err := config.Load()
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, cfg.LogFormat)
+		})
+	}
+}
+
+// TestJSONLoggerEmitsParseableLines is the contract a log system depends on:
+// every line is one JSON object with the message and its fields.
+func TestJSONLoggerEmitsParseableLines(t *testing.T) {
+	setEnv(t, map[string]string{"DATABASE_URL": testDatabaseURL, "LOG_FORMAT": "json"})
+
+	cfg, err := config.Load()
+	require.NoError(t, err)
+
+	f, err := os.CreateTemp(t.TempDir(), "sorovault-log")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.Remove(f.Name()) })
+
+	cfg.NewLogger(f).Info("sweep complete", "contracts", 3, "failed", 1)
+	require.NoError(t, f.Close())
+
+	body, err := os.ReadFile(f.Name())
+	require.NoError(t, err)
+
+	lines := strings.Split(strings.TrimSpace(string(body)), "\n")
+	require.Len(t, lines, 1)
+
+	var got map[string]any
+	require.NoError(t, json.Unmarshal([]byte(lines[0]), &got), "line was not JSON: %s", lines[0])
+	assert.Equal(t, "sweep complete", got["msg"])
+	assert.Equal(t, float64(3), got["contracts"])
+	assert.Equal(t, float64(1), got["failed"])
+}
+
+func TestCORSOrigins(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		want    []string
+		wantErr string
+	}{
+		{name: "unset means no CORS"},
+		{name: "one origin", value: "https://app.example.test", want: []string{"https://app.example.test"}},
+		{
+			name:  "a list, with space and a trailing slash",
+			value: " https://app.example.test/ , http://localhost:3000 ",
+			want:  []string{"https://app.example.test", "http://localhost:3000"},
+		},
+		{name: "wildcard", value: "*", want: []string{"*"}},
+		{
+			name:    "wildcard cannot be mixed with a list",
+			value:   "*, https://app.example.test",
+			wantErr: "not both",
+		},
+		{
+			name:    "wildcard after a list",
+			value:   "https://app.example.test, *",
+			wantErr: "not both",
+		},
+		{
+			name:    "not an origin",
+			value:   "not a url",
+			wantErr: "CORS_ORIGINS",
+		},
+		{
+			name:    "only http and https",
+			value:   "ftp://app.example.test",
+			wantErr: "http or https",
+		},
+		{
+			name:    "a path is not an origin",
+			value:   "https://app.example.test/api",
+			wantErr: "must be an origin",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			vars := map[string]string{"DATABASE_URL": testDatabaseURL}
+			if tt.value != "" {
+				vars["CORS_ORIGINS"] = tt.value
+			}
+			setEnv(t, vars)
+
+			cfg, err := config.Load()
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, cfg.CORSOrigins)
+		})
+	}
+}
+
+func TestRateLimit(t *testing.T) {
+	tests := []struct {
+		name    string
+		vars    map[string]string
+		want    int
+		wantErr string
+	}{
+		{name: "defaults", want: config.DefaultRateLimitPerMinute},
+		{name: "a configured limit", vars: map[string]string{"RATE_LIMIT_PER_MINUTE": "120"}, want: 120},
+		{name: "zero is not a limit", vars: map[string]string{"RATE_LIMIT_PER_MINUTE": "0"}, wantErr: "between"},
+		{name: "not a number", vars: map[string]string{"RATE_LIMIT_PER_MINUTE": "lots"}, wantErr: "RATE_LIMIT_PER_MINUTE"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			vars := map[string]string{"DATABASE_URL": testDatabaseURL}
+			for k, v := range tt.vars {
+				vars[k] = v
+			}
+			setEnv(t, vars)
+
+			cfg, err := config.Load()
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, cfg.RateLimitPerMinute)
+		})
+	}
+
+	t.Run("burst", func(t *testing.T) {
+		setEnv(t, map[string]string{
+			"DATABASE_URL":          testDatabaseURL,
+			"RATE_LIMIT_BURST":      "5",
+			"TRUST_X_FORWARDED_FOR": "true",
+		})
+
+		cfg, err := config.Load()
+		require.NoError(t, err)
+		assert.Equal(t, 5, cfg.RateLimitBurst)
+		assert.True(t, cfg.TrustXForwardedFor)
+	})
+
+	t.Run("invalid burst and boolean", func(t *testing.T) {
+		for _, vars := range []map[string]string{
+			{"RATE_LIMIT_BURST": "0"},
+			{"RATE_LIMIT_BURST": "many"},
+			{"TRUST_X_FORWARDED_FOR": "sometimes"},
+		} {
+			env := map[string]string{"DATABASE_URL": testDatabaseURL}
+			for k, v := range vars {
+				env[k] = v
+			}
+			setEnv(t, env)
+
+			_, err := config.Load()
+			require.Error(t, err)
+		}
+	})
+}
+
 func TestInvalidValues(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -232,6 +415,11 @@ func TestInvalidValues(t *testing.T) {
 			name:    "unknown log level",
 			vars:    map[string]string{"DATABASE_URL": testDatabaseURL, "LOG_LEVEL": "chatty"},
 			wantErr: "unknown LOG_LEVEL",
+		},
+		{
+			name:    "unknown log format",
+			vars:    map[string]string{"DATABASE_URL": testDatabaseURL, "LOG_FORMAT": "xml"},
+			wantErr: "unknown LOG_FORMAT",
 		},
 		{
 			name:    "unparseable timeout",

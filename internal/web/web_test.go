@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/soroworks/sorovault/internal/api"
 	"github.com/soroworks/sorovault/internal/model"
 	"github.com/soroworks/sorovault/internal/registry"
 	"github.com/soroworks/sorovault/internal/spec"
@@ -330,6 +331,33 @@ func TestContractPage(t *testing.T) {
 	assert.Contains(t, body, "0123456789abcdef0123456789abcdef01234567")
 	assert.Contains(t, body, "current")
 	assert.Contains(t, body, "/api/contracts/"+idA+"/client.ts?", "the typed client should be linked")
+}
+
+// TestContractPageOffersTheABIDownload proves the page links to the
+// interface as a file, and not only to the document the browser renders.
+func TestContractPageOffersTheABIDownload(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.register(t, idA)
+
+	const hash = "c618dae264864ccf446a3c7db27da80c7c83e840131242cc2fe9cd32a2a20781"
+
+	resp, body := h.get(t, "/contracts/"+idA)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	assert.Contains(t, body,
+		`href="/api/contracts/`+idA+`?network=testnet&amp;wasm_hash=`+hash+`&amp;download=1"`,
+		"the page should link to the interface as a download")
+
+	// The name is spelled out here rather than built from the API's own
+	// helper: the .abi.json suffix is what the file is promised to be, and
+	// a test that reuses the implementation cannot notice it changing.
+	const want = idA + ".c618dae26486.abi.json"
+	assert.Equal(t, want, api.ABIFilename(idA, hash),
+		"a downloaded interface must be named <contract>.<short-hash>.abi.json")
+	assert.Contains(t, body, want,
+		"the link should say what the downloaded file will be called")
 }
 
 // TestContractPageEscapesOutput guards against a contract's own strings

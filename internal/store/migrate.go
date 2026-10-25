@@ -124,31 +124,72 @@ func MigrationStatus(ctx context.Context, databaseURL string) (current, latest u
 // LatestMigrationVersion reports the highest version among the embedded
 // migrations.
 //
-// The versions are read through golang-migrate's own source, so the naming
+// The versions are read through golang-migrate's own parser, so the naming
 // convention stays in one place.
 func LatestMigrationVersion() (uint, error) {
+	migrations, err := EmbeddedMigrations()
+	if err != nil {
+		return 0, err
+	}
+	if len(migrations) == 0 {
+		return 0, errors.New("store: no embedded migrations")
+	}
+	return migrations[len(migrations)-1].Version, nil
+}
+
+// Migration is one migration in the embedded set.
+type Migration struct {
+	// Version is the migration's version number.
+	Version uint
+	// Name is the migration's name, without the version prefix or the
+	// .up.sql suffix.
+	Name string
+}
+
+// EmbeddedMigrations lists the migrations embedded in the binary, oldest
+// first.
+//
+// The list comes from golang-migrate's own source, so the file naming
+// convention and the ordering stay in one place, and a migrations directory
+// the migrator would refuse — a duplicate version, say — is refused here
+// too rather than quietly listed.
+func EmbeddedMigrations() ([]Migration, error) {
 	src, err := iofs.New(sorovault.Migrations, "migrations")
 	if err != nil {
-		return 0, fmt.Errorf("store: reading embedded migrations: %w", err)
+		return nil, fmt.Errorf("store: reading embedded migrations: %w", err)
 	}
+	defer func() { _ = src.Close() }()
 
 	version, err := src.First()
 	if err != nil {
-		return 0, fmt.Errorf("store: reading embedded migrations: %w", err)
+		if errors.Is(err, fs.ErrNotExist) {
+			// An empty migrations directory is not an error; it is a
+			// binary with nothing to apply.
+			return nil, nil
+		}
+		return nil, fmt.Errorf("store: reading embedded migrations: %w", err)
 	}
+
+	var migrations []Migration
 	for {
+		body, name, err := src.ReadUp(version)
+		if err != nil {
+			return nil, fmt.Errorf("store: reading embedded migration %d: %w", version, err)
+		}
+		_ = body.Close()
+
+		migrations = append(migrations, Migration{Version: version, Name: name})
+
 		next, err := src.Next(version)
 		if err != nil {
-			// The source reports the end of the migrations as a missing
-			// path.
 			if errors.Is(err, fs.ErrNotExist) {
 				break
 			}
-			return 0, fmt.Errorf("store: reading embedded migrations: %w", err)
+			return nil, fmt.Errorf("store: reading embedded migrations: %w", err)
 		}
 		version = next
 	}
-	return version, nil
+	return migrations, nil
 }
 
 // closeMigrator releases a migrator's source and database handles. Errors
