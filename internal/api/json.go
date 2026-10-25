@@ -87,6 +87,9 @@ type listResponse struct {
 	Total     int              `json:"total"`
 	Limit     int              `json:"limit"`
 	Offset    int              `json:"offset"`
+	// Next is the cursor of the following page. Empty means the listing
+	// reached its end on this page.
+	Next string `json:"next,omitempty"`
 }
 
 type contractResponse struct {

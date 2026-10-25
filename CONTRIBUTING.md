@@ -45,7 +45,8 @@ CI runs both, plus a Docker build and a `go mod tidy` check.
 
 Read [the layout section of the README](README.md#how-it-fits-together) first.
 The short version: three interfaces are the seams, and most changes belong on
-one side of one of them.
+one side of one of them. For the package map, the two write paths and the
+invariants behind them, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 | You want to… | Look at |
 |---|---|

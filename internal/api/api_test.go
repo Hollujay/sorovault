@@ -1019,6 +1019,30 @@ func TestTypeScriptClient(t *testing.T) {
 	assert.Contains(t, body, `export const contractId = "`+idA+`";`)
 	assert.Contains(t, body, `export const wasmHash = "`+stellartest.HashOf(module)+`";`)
 	assert.Contains(t, body, "has_voted(args: { nullifier: Buffer }")
+	assert.Contains(t, body, "export function assertSameWasm(liveHash: string): boolean {")
+	assert.Contains(t, body, "if (liveHash === wasmHash) return true;")
+
+	// An upgrade moves what the default client is generated from; the
+	// ?wasm_hash= client stays pinned to the superseded version, byte for
+	// byte, so a committed client can be regenerated to compare against.
+	old := stellartest.HashOf(module)
+	upgrade := moduleWith(t, "score")
+	h.fake.Deploy(idA, upgrade)
+	resp, raw = h.do(t, http.MethodPost, "/api/contracts", `{"contract_id":"`+idA+`"}`)
+	// The upgrade is a change to a known contract, not a new one.
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+
+	resp, raw = h.do(t, http.MethodGet, "/api/contracts/"+idA+"/client.ts?wasm_hash="+old, "")
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+	assert.Contains(t, string(raw), `export const wasmHash = "`+old+`";`)
+	assert.Contains(t, string(raw), "has_voted(args: { nullifier: Buffer }")
+	assert.NotContains(t, string(raw), "score(args")
+
+	resp, raw = h.do(t, http.MethodGet, "/api/contracts/"+idA+"/client.ts", "")
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+	assert.Contains(t, string(raw), `export const wasmHash = "`+stellartest.HashOf(upgrade)+`";`)
+	assert.Contains(t, string(raw), "score(args: { who: string }")
+	assert.NotContains(t, string(raw), "has_voted")
 
 	resp, _ = h.do(t, http.MethodGet, "/api/contracts/"+idA+"/client.ts?download=1", "")
 	assert.Equal(t, `attachment; filename="`+idA+`.client.ts"`, resp.Header.Get("Content-Disposition"))

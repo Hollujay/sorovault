@@ -36,7 +36,8 @@ const sdkImport = "@stellar/stellar-sdk/contract"
 // user-defined type with one of these names gets a trailing underscore.
 var reservedTypeNames = map[string]bool{
 	"sdk": true, "Buffer": true, "Client": true, "Errors": true, "connect": true,
-	"contractId": true, "networkName": true, "wasmHash": true,
+	"assertSameWasm": true,
+	"contractId":     true, "networkName": true, "wasmHash": true,
 	"Array": true, "Map": true, "Set": true, "Promise": true, "Object": true,
 	"String": true, "Number": true, "Boolean": true, "Symbol": true,
 	"BigInt": true, "Error": true, "Date": true, "Function": true,
@@ -221,7 +222,23 @@ func (g *tsGen) writeClient(fns []model.Function) {
 	g.b.WriteString("\n/** Typed methods of the contract. Each one simulates on call; sign and send the result to submit. */\n")
 	g.b.WriteString("export interface Client {\n")
 	for _, fn := range fns {
-		g.writeDoc("  ", fn.Doc)
+		// Arguments are properties of the single args object, so JSDoc
+		// must use args.<name> to attach hover documentation correctly.
+		// Reuse writeDoc for escaping */ and formatting multiline docs.
+		var docs []string
+		if strings.TrimSpace(fn.Doc) != "" {
+			docs = append(docs, strings.TrimSpace(fn.Doc))
+		}
+		for _, in := range fn.Inputs {
+			if doc := strings.TrimSpace(in.Doc); doc != "" {
+				lines := strings.Split(doc, "\n")
+				for i := 1; i < len(lines); i++ {
+					lines[i] = strings.TrimSpace(lines[i])
+				}
+				docs = append(docs, "@param args."+in.Name+" "+strings.Join(lines, "\n"))
+			}
+		}
+		g.writeDoc("  ", strings.Join(docs, "\n\n"))
 
 		ret := "null"
 		if len(fn.Outputs) > 0 {
@@ -252,6 +269,24 @@ export function connect(
   options: Omit<sdk.ClientOptions, "contractId"> & { contractId?: string },
 ): Promise<sdk.Client & Client> {
   return sdk.Client.from<Client>({ ...options, contractId: options.contractId ?? contractId });
+}
+
+/**
+ * assertSameWasm warns when the deployed contract no longer runs the
+ * interface this client was generated for: an upgrade may have removed
+ * or changed the functions above, and the old method names would fail
+ * deep inside a call. Pass the contract's live wasm_hash — SoroVault's
+ * GET /api/contracts/{id} returns it — and the function returns whether
+ * the client still matches. Calling it is entirely optional: nothing
+ * happens without it, so offline use keeps working.
+ */
+export function assertSameWasm(liveHash: string): boolean {
+  if (liveHash === wasmHash) return true;
+  console.warn(
+    "[sorovault] contract " + contractId + " changed: this client was generated" +
+      " for WASM " + wasmHash + " but the live hash is " + liveHash + ". Regenerate the client.",
+  );
+  return false;
 }
 `)
 }

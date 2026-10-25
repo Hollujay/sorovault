@@ -45,6 +45,15 @@ func (f *RPCFetcher) Network(ctx context.Context) (string, error) {
 	return resp.Passphrase, nil
 }
 
+// LatestLedger reports the network ledger at the moment of observation.
+func (f *RPCFetcher) LatestLedger(ctx context.Context) (uint32, error) {
+	resp, err := f.client.GetLatestLedger(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("stellar: getLatestLedger: %w", err)
+	}
+	return resp.Sequence, nil
+}
+
 // WasmHash returns the hex hash of the WASM the contract currently executes.
 func (f *RPCFetcher) WasmHash(ctx context.Context, contractID string) (string, error) {
 	hash, err := f.instanceWasmHash(ctx, contractID)

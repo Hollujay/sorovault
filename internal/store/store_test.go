@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"testing"
@@ -106,6 +107,20 @@ func standardInterface() *model.Interface {
 
 func contract(id, network, hash string) store.Contract {
 	return store.Contract{ContractID: id, Network: network, CurrentWasmHash: hash}
+}
+
+// unique returns the values with duplicates collapsed, so a walk's
+// completeness and the absence of repeats can be one assertion each.
+func unique(values []string) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, v := range values {
+		if !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 const (
@@ -328,6 +343,153 @@ func runStoreSuite(t *testing.T, newStore factory) {
 		require.NoError(t, err)
 		assert.Empty(t, past.Contracts)
 		assert.Equal(t, 2, past.Total, "paging past the end still reports the true total")
+	})
+
+	t.Run("cursor pagination walks every contract exactly once", func(t *testing.T) {
+		s := newStore(t)
+		ctx := context.Background()
+
+		idC := idA[:len(idA)-1] + "X"
+		for _, id := range []string{idA, idB, idC} {
+			require.NoError(t, s.Save(ctx, contract(id, "testnet", "h1"), iface("f")))
+		}
+
+		// One contract per page, so every page boundary is exercised.
+		var seen []string
+		cursor := ""
+		for {
+			page, err := s.ListContracts(ctx, store.ListFilter{Limit: 1, Cursor: cursor})
+			require.NoError(t, err)
+			for _, c := range page.Contracts {
+				seen = append(seen, c.Network+"/"+c.ContractID)
+			}
+			if page.Next == "" {
+				break
+			}
+			cursor = page.Next
+		}
+		require.Len(t, seen, 3, "the walk reaches every contract")
+		assert.Len(t, unique(seen), 3, "no contract repeats across page boundaries")
+
+		// And the whole listing matches walking by offset.
+		offsetList, err := s.ListContracts(ctx, store.ListFilter{Limit: store.MaxLimit})
+		require.NoError(t, err)
+		var listed []string
+		for _, c := range offsetList.Contracts {
+			listed = append(listed, c.Network+"/"+c.ContractID)
+		}
+		assert.Equal(t, listed, seen, "a cursor walk covers the same rows in the same order")
+	})
+
+	t.Run("a contract added while a client pages is never repeated", func(t *testing.T) {
+		s := newStore(t)
+		ctx := context.Background()
+
+		idC := idA[:len(idA)-1] + "X"
+		require.NoError(t, s.Save(ctx, contract(idA, "testnet", "h1"), iface("f")))
+		require.NoError(t, s.Save(ctx, contract(idB, "testnet", "h1"), iface("f")))
+
+		firstPage, err := s.ListContracts(ctx, store.ListFilter{Limit: 1})
+		require.NoError(t, err)
+		require.NotEmpty(t, firstPage.Next, "two contracts over a limit of one leave a next page")
+
+		// The arrival the offset walk trips over: the fresh row shifts
+		// every page after it down by one, and the row at the boundary is
+		// returned twice. A cursor walk has no positions to shift, so the
+		// rows must not double up no matter where the newcomer sorts.
+		require.NoError(t, s.Save(ctx, contract(idC, "testnet", "h1"), iface("f")))
+
+		walked := []string{firstPage.Contracts[0].Network + "/" + firstPage.Contracts[0].ContractID}
+		cursor := firstPage.Next
+		for {
+			page, err := s.ListContracts(ctx, store.ListFilter{Limit: 1, Cursor: cursor})
+			require.NoError(t, err)
+			for _, c := range page.Contracts {
+				walked = append(walked, c.Network+"/"+c.ContractID)
+			}
+			if page.Next == "" {
+				break
+			}
+			cursor = page.Next
+		}
+
+		// Every contract the walk started with is still reached — where it
+		// sits on the page or after it — and none of them twice. Whether
+		// the newcomer itself is inside this walk depends on where its
+		// refresh time sorts it against the cursor, so its turn is
+		// asserted on a walk that starts after it exists.
+		for _, want := range []string{"testnet/" + idA, "testnet/" + idB} {
+			assert.Contains(t, walked, want, "the walk that started before the arrival still reaches it")
+		}
+		assert.Len(t, unique(walked), len(walked), "nothing repeats")
+
+		// And a walk that starts after the arrival covers everything
+		// — the newcomer included — exactly once.
+		var settled []string
+		cursor = ""
+		for {
+			page, err := s.ListContracts(ctx, store.ListFilter{Limit: 2, Cursor: cursor})
+			require.NoError(t, err)
+			for _, c := range page.Contracts {
+				settled = append(settled, c.Network+"/"+c.ContractID)
+			}
+			if page.Next == "" {
+				break
+			}
+			cursor = page.Next
+		}
+		require.Len(t, settled, 3, "the newcomer is in the walk that started after it exists")
+		assert.Len(t, unique(settled), 3, "and exactly once")
+	})
+
+	t.Run("the same contract on two networks pages without a gap", func(t *testing.T) {
+		s := newStore(t)
+		ctx := context.Background()
+
+		// One contract ID registered on two networks refreshes in the same
+		// instant: the listing's network tiebreak keeps a cursor from
+		// seeing one of the two twice or never.
+		require.NoError(t, s.Save(ctx, contract(idA, "testnet", "h1"), iface("f")))
+		require.NoError(t, s.Save(ctx, contract(idA, "mainnet", "h1"), iface("f")))
+
+		var seen []string
+		cursor := ""
+		for {
+			page, err := s.ListContracts(ctx, store.ListFilter{Limit: 1, Cursor: cursor})
+			require.NoError(t, err)
+			for _, c := range page.Contracts {
+				seen = append(seen, c.Network)
+			}
+			if page.Next == "" {
+				break
+			}
+			cursor = page.Next
+		}
+		assert.ElementsMatch(t, []string{"testnet", "mainnet"}, seen,
+			"both rows of the ID are reached exactly once")
+	})
+
+	t.Run("a malformed cursor is rejected", func(t *testing.T) {
+		s := newStore(t)
+		ctx := context.Background()
+
+		_, err := s.ListContracts(ctx, store.ListFilter{Cursor: "not-a-cursor"})
+		assert.ErrorIs(t, err, store.ErrMalformedCursor)
+
+		// Valid base64 around the wrong document is the same failure.
+		blank := base64.RawURLEncoding.EncodeToString([]byte(`{"x":1}`))
+		_, err = s.ListContracts(ctx, store.ListFilter{Cursor: blank})
+		assert.ErrorIs(t, err, store.ErrMalformedCursor)
+	})
+
+	t.Run("a cursor and an offset are exclusive", func(t *testing.T) {
+		s := newStore(t)
+		ctx := context.Background()
+
+		_, err := s.ListContracts(ctx, store.ListFilter{Limit: 1, Offset: 1, Cursor: "not-a-cursor"})
+		require.Error(t, err)
+		assert.NotErrorIs(t, err, store.ErrMalformedCursor,
+			"the contradiction is reported before the cursor is even read")
 	})
 
 	t.Run("search is case-insensitive", func(t *testing.T) {

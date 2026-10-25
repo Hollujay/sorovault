@@ -288,3 +288,39 @@ func TestMarkdownDocumentsInterface(t *testing.T) {
 		assert.Contains(t, got, want)
 	}
 }
+
+func TestTypeScriptParameterDocumentation(t *testing.T) {
+	t.Parallel()
+	iface := &model.Interface{
+		Types: model.Types{Structs: []model.Struct{{
+			Name: "Config",
+			Fields: []model.StructField{{
+				Name: "threshold", Doc: "Minimum required */ threshold.", Type: model.Scalar(model.KindU32),
+			}},
+		}}},
+		Functions: []model.Function{
+			{Name: "transfer", Doc: "Transfer tokens.", Inputs: []model.Param{
+				{Name: "to", Doc: "Recipient address.", Type: model.Scalar(model.KindAddress)},
+				{Name: "amount", Doc: "Amount in stroops. */ Keep exact.\nSecond line.", Type: model.Scalar(model.KindI128)},
+				{Name: "memo", Type: model.Scalar(model.KindString)},
+			}},
+			{Name: "set_threshold", Inputs: []model.Param{
+				{Name: "threshold", Doc: "Minimum required.", Type: model.Scalar(model.KindU32)},
+			}},
+		},
+	}
+	got, err := codegen.TypeScript(iface, src)
+	require.NoError(t, err)
+	for _, want := range []string{
+		" * Transfer tokens.",
+		" * @param args.to Recipient address.",
+		" * @param args.amount Amount in stroops. *\\/ Keep exact.",
+		" * Second line.",
+		" * @param args.threshold Minimum required.",
+		"  /**\n   * Minimum required *\\/ threshold.\n   */\n  threshold: sdk.u32;",
+	} {
+		assert.Contains(t, got, want)
+	}
+	assert.NotContains(t, got, "@param args.memo", "undocumented parameters should not emit tags")
+	assert.NotContains(t, got, " * @param args.amount Amount in stroops. */", "parameter docs must escape comment terminators")
+}

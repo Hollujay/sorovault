@@ -54,7 +54,8 @@
           { "name": "implements", "in": "query", "description": "Only contracts implementing every listed standard interface ID, such as sep41. Repeatable.", "schema": { "type": "array", "items": { "type": "string" } }, "style": "form", "explode": true },
           { "$ref": "#/components/parameters/network" },
           { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 } },
-          { "name": "offset", "in": "query", "schema": { "type": "integer", "minimum": 0, "default": 0 } }
+          { "name": "offset", "in": "query", "deprecated": true, "description": "Deprecated. Rows to skip; keep paging with cursor instead — offsets repeat and skip rows added while a client pages.", "schema": { "type": "integer", "minimum": 0, "default": 0 } },
+          { "name": "cursor", "in": "query", "description": "The next cursor of the previous page. Opaque; pass it back unchanged. A cursor and an offset are exclusive. Unreadable cursors are a 400.", "schema": { "type": "string" } }
         ],
         "responses": {
           "200": { "description": "One page of contracts.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ContractList" }, "examples": { "zkvote": { "$ref": "#/components/examples/ContractList" } } } } },
@@ -313,7 +314,7 @@
     "/api/contracts/{id}/client.ts": {
       "get": {
         "summary": "A typed TypeScript client",
-        "description": "Generated from the stored interface; builds on @stellar/stellar-sdk >= 14.",
+        "description": "Generated from the stored interface; builds on @stellar/stellar-sdk >= 14. The file embeds the WASM hash it was generated for as the wasmHash export and exposes assertSameWasm(liveHash) to warn on a mismatch; the check is opt-in.",
         "operationId": "getTypeScriptClient",
         "parameters": [
           { "$ref": "#/components/parameters/id" },
@@ -682,7 +683,8 @@
           "contracts": { "type": "array", "items": { "$ref": "#/components/schemas/Contract" } },
           "total": { "type": "integer", "description": "Matches ignoring paging." },
           "limit": { "type": "integer" },
-          "offset": { "type": "integer" }
+          "offset": { "type": "integer" },
+          "next": { "type": "string", "description": "The cursor of the following page, absent once the listing has ended." }
         },
         "required": ["contracts", "total", "limit", "offset"]
       },

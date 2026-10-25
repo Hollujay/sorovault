@@ -61,6 +61,7 @@ Configuration is read from the environment:
 		newGetCmd(),
 		newVersionsCmd(),
 		newCodegenCmd(),
+		newCheckClientCmd(),
 		newRefreshCmd(),
 		newExportCmd(),
 		newImportCmd(),

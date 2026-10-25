@@ -541,8 +541,20 @@ func (s *Server) listUpgrades(w http.ResponseWriter, r *http.Request) {
 }
 
 // listContracts serves GET /api/contracts.
+//
+// Paging is either by cursor or by the deprecated offset. A cursor names the
+// last row of the previous page, so rows added while a client pages through
+// the listing are seen exactly once — which is the property offsets lose.
 func (s *Server) listContracts(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+
+	cursor := q.Get("cursor")
+	offset := intParam(q.Get("offset"), 0)
+	if cursor != "" && offset != 0 {
+		writeError(w, http.StatusBadRequest,
+			"give a cursor or an offset, not both; offset is deprecated, so prefer the cursor")
+		return
+	}
 
 	filter := store.ListFilter{
 		Network: q.Get("network"),
@@ -553,7 +565,8 @@ func (s *Server) listContracts(w http.ResponseWriter, r *http.Request) {
 		Types:      q["type"],
 		Implements: q["implements"],
 		Limit:      intParam(q.Get("limit"), 0),
-		Offset:     intParam(q.Get("offset"), 0),
+		Offset:     offset,
+		Cursor:     cursor,
 	}
 	filter.Normalize()
 
@@ -568,6 +581,7 @@ func (s *Server) listContracts(w http.ResponseWriter, r *http.Request) {
 		Total:     page.Total,
 		Limit:     filter.Limit,
 		Offset:    filter.Offset,
+		Next:      page.Next,
 	})
 }
 
@@ -1042,6 +1056,11 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 // failure cannot leak a connection string or query text to a caller.
 func (s *Server) errorStatus(r *http.Request, err error) (int, string) {
 	switch {
+	case errors.Is(err, store.ErrMalformedCursor):
+		// A cursor is a client-typed string; an unreadable one is the
+		// caller's mistake, not the server's.
+		return http.StatusBadRequest, err.Error()
+
 	case errors.Is(err, store.ErrNotFound), errors.Is(err, stellar.ErrContractNotFound), errors.Is(err, stellar.ErrWasmNotFound):
 		return http.StatusNotFound, err.Error()
 
