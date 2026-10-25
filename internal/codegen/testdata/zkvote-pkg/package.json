@@ -20,12 +20,12 @@
     "prepublishOnly": "npm run build"
   },
   "peerDependencies": {
-    "@stellar/stellar-sdk": "17.2.1",
+    "@stellar/stellar-sdk": "17.3.0",
     "buffer": "6.0.3",
     "zod": "3.25.76"
   },
   "devDependencies": {
-    "@stellar/stellar-sdk": "17.2.1",
+    "@stellar/stellar-sdk": "17.3.0",
     "buffer": "6.0.3",
     "typescript": "7.0.2",
     "zod": "3.25.76"
