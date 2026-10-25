@@ -24,6 +24,7 @@ type Memory struct {
 	contracts map[string]Contract
 	specs     map[string][]Spec
 	wasmSpecs map[string]WasmSpec
+	subs      map[string]Subscription
 	nextID    int64
 
 	// now is the clock, swappable so tests can produce deterministic and
@@ -39,6 +40,7 @@ func NewMemory() *Memory {
 		contracts: make(map[string]Contract),
 		specs:     make(map[string][]Spec),
 		wasmSpecs: make(map[string]WasmSpec),
+		subs:      make(map[string]Subscription),
 		now:       time.Now,
 	}
 }
@@ -56,6 +58,112 @@ func (m *Memory) Ping(ctx context.Context) error { return ctx.Err() }
 
 // Close satisfies Store. There is nothing to release.
 func (m *Memory) Close() error { return nil }
+
+// Subscribe creates a new webhook subscription for the given network and
+// contract IDs. Returns the subscription ID (which also serves as the
+// secret for HMAC signing and deletion).
+func (m *Memory) Subscribe(ctx context.Context, network string, contractIDs []string, url string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	id, err := newSubscriptionSecret()
+	if err != nil {
+		return "", err
+	}
+	k := id
+	sub := Subscription{
+		ID:          id,
+		Network:     network,
+		ContractIDs: contractIDs,
+		URL:         url,
+		Active:      true,
+		CreatedAt:   m.now(),
+	}
+	m.subs[k] = sub
+	return id, nil
+}
+
+// ListSubscriptions returns all subscriptions, active and inactive.
+func (m *Memory) ListSubscriptions(ctx context.Context) ([]SubscriptionListItem, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	items := make([]SubscriptionListItem, 0, len(m.subs))
+	for _, sub := range m.subs {
+		items = append(items, SubscriptionListItem{
+			ID:        sub.ID,
+			Network:   sub.Network,
+			Contracts: len(sub.ContractIDs),
+			Active:    sub.Active,
+			CreatedAt: sub.CreatedAt.UTC().Format(time.RFC3339),
+		})
+	}
+	// Sort by created_at descending
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].CreatedAt > items[j].CreatedAt
+	})
+	return items, nil
+}
+
+// GetSubscription returns a subscription by its secret (ID).
+func (m *Memory) GetSubscription(ctx context.Context, secret string) (*Subscription, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	k := secret
+	sub, ok := m.subs[k]
+	if !ok {
+		return nil, fmt.Errorf("%w: subscription not found", ErrNotFound)
+	}
+	// Return a clone so the caller can mutate it safely.
+	out := sub
+	out.ContractIDs = make([]string, len(sub.ContractIDs))
+	copy(out.ContractIDs, sub.ContractIDs)
+	return &out, nil
+}
+
+// MarkSubscriptionInactive marks a subscription as inactive.
+func (m *Memory) MarkSubscriptionInactive(ctx context.Context, secret string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	k := secret
+	sub, ok := m.subs[k]
+	if !ok {
+		return fmt.Errorf("%w: subscription not found", ErrNotFound)
+	}
+	sub.Active = false
+	m.subs[k] = sub
+	return nil
+}
+
+// Unsubscribe removes a subscription by its secret (ID).
+func (m *Memory) Unsubscribe(ctx context.Context, secret string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	k := secret
+	if _, ok := m.subs[k]; !ok {
+		return fmt.Errorf("%w: subscription not found", ErrNotFound)
+	}
+	delete(m.subs, k)
+	return nil
+}
 
 func key(network, contractID string) string { return network + "\x00" + contractID }
 

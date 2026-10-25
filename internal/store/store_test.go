@@ -129,6 +129,49 @@ const (
 )
 
 func runStoreSuite(t *testing.T, newStore factory) {
+	t.Run("subscriptions round-trip by secret", func(t *testing.T) {
+		s := newStore(t)
+		ctx := context.Background()
+
+		empty, err := s.ListSubscriptions(ctx)
+		require.NoError(t, err)
+		assert.NotNil(t, empty, "an empty listing is an empty list, not null")
+		assert.Empty(t, empty)
+
+		secret, err := s.Subscribe(ctx, "testnet", []string{idA, idB}, "https://hooks.example.test")
+		require.NoError(t, err)
+		other, err := s.Subscribe(ctx, "testnet", []string{idA}, "https://other.example.test")
+		require.NoError(t, err)
+		assert.NotEqual(t, secret, other, "every subscription gets its own secret")
+
+		sub, err := s.GetSubscription(ctx, secret)
+		require.NoError(t, err)
+		assert.Equal(t, "testnet", sub.Network)
+		assert.Equal(t, []string{idA, idB}, sub.ContractIDs)
+		assert.Equal(t, "https://hooks.example.test", sub.URL)
+		assert.True(t, sub.Active)
+
+		items, err := s.ListSubscriptions(ctx)
+		require.NoError(t, err)
+		require.Len(t, items, 2)
+		counts := map[string]int{}
+		for _, item := range items {
+			counts[item.ID] = item.Contracts
+		}
+		assert.Equal(t, map[string]int{secret: 2, other: 1}, counts)
+
+		require.NoError(t, s.MarkSubscriptionInactive(ctx, secret))
+		sub, err = s.GetSubscription(ctx, secret)
+		require.NoError(t, err)
+		assert.False(t, sub.Active)
+
+		require.NoError(t, s.Unsubscribe(ctx, secret))
+		_, err = s.GetSubscription(ctx, secret)
+		require.ErrorIs(t, err, store.ErrNotFound)
+		require.ErrorIs(t, s.Unsubscribe(ctx, secret), store.ErrNotFound)
+		require.ErrorIs(t, s.MarkSubscriptionInactive(ctx, secret), store.ErrNotFound)
+	})
+
 	t.Run("filters by exact implemented standard", func(t *testing.T) {
 		s := newStore(t)
 		ctx := context.Background()
