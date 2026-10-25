@@ -155,6 +155,10 @@ func newRouter(reg *registry.Registry, log *slog.Logger, refresh *refresher.Refr
 		return nil, err
 	}
 
+	if cfg != nil {
+		ui.SetPublicURL(cfg.PublicURL)
+	}
+
 	server := api.NewServer(reg, log)
 	if refresh != nil {
 		server.SetLastSweep(refresh.LastSweep)

@@ -55,6 +55,8 @@ type Config struct {
 	MaxConcurrentRegistrations int
 	// HTTPAddr is the address the API and browse UI listen on.
 	HTTPAddr string
+	// PublicURL is the externally reachable origin for link previews and sitemaps.
+	PublicURL string
 	// LogLevel is one of debug, info, warn, error.
 	LogLevel slog.Level
 	// LogFormat selects the handler: text for people, json for log systems
@@ -140,6 +142,7 @@ func Load() (*Config, error) {
 		NetworkPassphrase: envOr("NETWORK_PASSPHRASE", DefaultNetworkPassphrase),
 		DatabaseURL:       databaseURL,
 		HTTPAddr:          envOr("HTTP_ADDR", DefaultHTTPAddr),
+		PublicURL:         strings.TrimRight(strings.TrimSpace(os.Getenv("PUBLIC_URL")), "/"),
 		RPCTimeout:        DefaultRPCTimeout,
 	}
 
@@ -218,6 +221,13 @@ func Load() (*Config, error) {
 	}
 	if err := loadSigning(cfg); err != nil {
 		return nil, err
+	}
+
+	if cfg.PublicURL != "" {
+		parsed, err := url.Parse(cfg.PublicURL)
+		if err != nil || parsed.Host == "" || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.User != nil {
+			return nil, errors.New("config: PUBLIC_URL must be a public absolute HTTP(S) origin without a path, query, credentials or fragment")
+		}
 	}
 
 	if cfg.DatabaseURL == "" {

@@ -105,6 +105,18 @@ Worth writing down, because it is the part that is easy to get wrong:
 The SDK does not parse WASM custom sections, so `internal/wasm` implements the
 small amount of the binary format that step 3 needs.
 
+
+### Link previews and sitemaps
+
+Set `PUBLIC_URL` to the externally reachable origin (for example,
+`https://registry.example.org`) to enable the XML sitemap at `/sitemap.xml`
+and canonical Open Graph URLs on contract pages. Contract pages include
+an escaped description with the network, number of functions, and first
+five function names. Sitemaps use `last_refreshed` for `<lastmod>`, and
+registries with over 49,999 contracts use a sitemap index that links to
+bounded pages of at most 50,000 URLs. When `PUBLIC_URL` is unset the
+sitemap is unavailable (404).
+
 ## Quickstart
 
 The fastest path is Docker, which brings up Postgres, applies migrations and

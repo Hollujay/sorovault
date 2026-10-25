@@ -21,6 +21,29 @@
      accessible name. */}}
 {{define "copy_icon"}}<svg width="13" height="13" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="5.5" y="5.5" width="9" height="9" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M10.5 3.5h-8v8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>{{end}}
 
+{{define "contract_head"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.MetaTitle}}</title>
+<meta name="description" content="{{.MetaDescription}}">
+<meta property="og:title" content="{{.MetaTitle}}">
+<meta property="og:description" content="{{.MetaDescription}}">
+{{if .MetaURL}}<meta property="og:url" content="{{.MetaURL}}">{{end}}
+<link rel="stylesheet" href="/static/app.css">
+<meta name="htmx-config" content='{"includeIndicatorStyles":false}'>
+<script src="/static/htmx.min.js" defer></script>
+<script src="/static/copy.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/">SoroVault</a>
+  <span class="tagline">Soroban contract interface registry</span>
+</header>
+<main>
+{{end}}
+
 {{define "page_foot"}}
 </main>
 <footer>
