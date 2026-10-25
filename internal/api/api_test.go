@@ -52,12 +52,16 @@ func newHarnessWith(t *testing.T, opts registry.Options) *harness {
 	return newHarnessWithOptions(t, stellartest.New(), store.NewMemory(), opts)
 }
 
+// newHarnessWithStore is newHarness with a store of the caller's choosing,
+// so a test can watch what the API does with one.
 func newHarnessWithStore(t *testing.T, fake *stellartest.Fake, db store.Store) *harness {
 	t.Helper()
 
 	return newHarnessWithOptions(t, fake, db, registry.Options{})
 }
 
+// newHarnessWithOptions builds a harness over the given network, store and
+// registry options.
 func newHarnessWithOptions(t *testing.T, fake *stellartest.Fake, db store.Store, opts registry.Options) *harness {
 	t.Helper()
 
@@ -1047,6 +1051,14 @@ func TestTypeScriptClient(t *testing.T) {
 	resp, _ = h.do(t, http.MethodGet, "/api/contracts/"+idA+"/client.ts?download=1", "")
 	assert.Equal(t, `attachment; filename="`+idA+`.client.ts"`, resp.Header.Get("Content-Disposition"))
 
+	resp, raw = h.do(t, http.MethodGet, "/api/contracts/"+idA+"/client.ts?zod=1", "")
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+	zod := string(raw)
+	assert.Contains(t, zod, `import { z } from "zod";`)
+	assert.Contains(t, zod, "export const scoreArgsSchema = z.object({", "the schemas track the live interface")
+	assert.NotContains(t, zod, "ProposalSchema", "schemas follow what the interface holds now")
+	assert.NotContains(t, body, `import { z } from "zod";`, "the plain flavour stays zod-free")
+
 	resp, _ = h.do(t, http.MethodGet, "/api/contracts/"+idB+"/client.ts", "")
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 }
@@ -1099,6 +1111,50 @@ type databaseDownError struct{}
 
 func (*databaseDownError) Error() string {
 	return "dial tcp: connection string postgres://user:hunter2@db/registry refused"
+}
+
+func TestRegisterStellarAssetContract(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.fake.DeploySAC(idA)
+
+	resp, raw := h.do(t, http.MethodPost, "/api/contracts", `{"contract_id":"`+idA+`"}`)
+	require.Equal(t, http.StatusCreated, resp.StatusCode, string(raw))
+	registered := h.decode(t, raw)
+	iface := registered["interface"].(map[string]any)
+	assert.Equal(t, true, iface["builtin"])
+	assert.Equal(t, "https://developers.stellar.org/docs/tokens/stellar-asset-contract", iface["source"])
+	assert.Len(t, iface["functions"].([]any), 17)
+
+	resp, raw = h.do(t, http.MethodGet, "/api/contracts/"+idA, "")
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+	got := h.decode(t, raw)
+	assert.Equal(t, true, got["builtin"])
+	assert.Equal(t, "builtin:stellar-asset-contract:v1", got["interface_id"])
+	assert.NotContains(t, got, "wasm_hash")
+
+	resp, raw = h.do(t, http.MethodGet, "/api/contracts/"+idA+"/functions", "")
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+	got = h.decode(t, raw)
+	assert.Equal(t, true, got["builtin"])
+	assert.Equal(t, "builtin:stellar-asset-contract:v1", got["interface_id"])
+	assert.NotContains(t, got, "wasm_hash")
+
+	resp, raw = h.do(t, http.MethodGet, "/api/contracts/"+idA+"/versions", "")
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+	got = h.decode(t, raw)
+	versions := got["versions"].([]any)
+	require.Len(t, versions, 1)
+	version := versions[0].(map[string]any)
+	assert.Equal(t, true, version["builtin"])
+	assert.Equal(t, "builtin:stellar-asset-contract:v1", version["interface_id"])
+	assert.NotContains(t, version, "wasm_hash")
+
+	resp, raw = h.do(t, http.MethodGet, "/api/contracts/"+idA+"/client.ts", "")
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+	assert.Contains(t, string(raw), `export const interfaceId = "builtin:stellar-asset-contract:v1";`)
+	assert.NotContains(t, string(raw), "export const wasmHash")
 }
 
 func TestListContractsFiltersByImplementedStandard(t *testing.T) {

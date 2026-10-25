@@ -22,9 +22,26 @@ type Postgres struct {
 
 var _ Store = (*Postgres)(nil)
 
+// PoolOptions sizes the Postgres connection pool.
+//
+// A zero field leaves pgx's own default in place, so a caller that does not
+// care about the size gets the pool it would get by handing the connection
+// string to pgx unchanged.
+type PoolOptions struct {
+	// MaxConns is the maximum number of connections the pool holds open.
+	MaxConns int32
+	// MinConns is the number of connections the pool keeps open between
+	// requests.
+	MinConns int32
+}
+
 // NewPostgres connects to databaseURL and verifies the connection.
-func NewPostgres(ctx context.Context, databaseURL string) (*Postgres, error) {
-	pool, err := pgxpool.New(ctx, databaseURL)
+func NewPostgres(ctx context.Context, databaseURL string, opts PoolOptions) (*Postgres, error) {
+	poolCfg, err := ResolvePoolConfig(databaseURL, opts)
+	if err != nil {
+		return nil, err
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
 		return nil, fmt.Errorf("store: connecting to postgres: %w", err)
 	}
@@ -33,6 +50,42 @@ func NewPostgres(ctx context.Context, databaseURL string) (*Postgres, error) {
 		return nil, fmt.Errorf("store: pinging postgres: %w", err)
 	}
 	return &Postgres{pool: pool}, nil
+}
+
+// ResolvePoolConfig parses databaseURL and applies opts to it, returning the
+// pool configuration a store would use.
+//
+// An explicit size wins over the pool_max_conns and pool_min_conns
+// parameters in the connection string. The size is this deployment's own
+// knob, while a connection string is often shared with other tools that
+// have no business being moved by this deployment's settings.
+//
+// It is exported so that the precedence can be checked without a database.
+func ResolvePoolConfig(databaseURL string, opts PoolOptions) (*pgxpool.Config, error) {
+	cfg, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("store: parsing postgres connection string: %w", err)
+	}
+	if opts.MaxConns > 0 {
+		cfg.MaxConns = opts.MaxConns
+	}
+	if opts.MinConns > 0 {
+		cfg.MinConns = opts.MinConns
+	}
+	// pgx does not check this, and a pool asked for more connections than
+	// its maximum would wait for one that can never be free.
+	if cfg.MinConns > cfg.MaxConns {
+		return nil, fmt.Errorf("store: pool minimum of %d connections exceeds its maximum of %d",
+			cfg.MinConns, cfg.MaxConns)
+	}
+	return cfg, nil
+}
+
+// PoolConfig reports the pool settings in force: the connection string's
+// parameters with any configured override applied on top.
+func (p *Postgres) PoolConfig() PoolOptions {
+	cfg := p.pool.Config()
+	return PoolOptions{MaxConns: cfg.MaxConns, MinConns: cfg.MinConns}
 }
 
 // NewPostgresFromPool wraps an existing pool. Tests use it to share a pool
@@ -921,8 +974,15 @@ func (p *Postgres) ListVersions(ctx context.Context, network, contractID string)
 	versions := []SpecVersion{}
 	for rows.Next() {
 		var v SpecVersion
-		if err := rows.Scan(&v.WasmHash, &v.DecodedAt, &v.Current, &v.ObservedLedger); err != nil {
+		var versionID string
+		if err := rows.Scan(&versionID, &v.DecodedAt, &v.Current, &v.ObservedLedger); err != nil {
 			return nil, fmt.Errorf("store: scanning version: %w", err)
+		}
+		if versionID == model.StellarAssetContractIdentifier {
+			v.InterfaceID = versionID
+			v.Builtin = true
+		} else {
+			v.WasmHash = versionID
 		}
 		versions = append(versions, v)
 	}

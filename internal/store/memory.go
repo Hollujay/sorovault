@@ -799,12 +799,14 @@ func (m *Memory) ListVersions(ctx context.Context, network, contractID string) (
 
 	versions := make([]SpecVersion, 0, len(m.specs[k]))
 	for _, s := range m.specs[k] {
-		versions = append(versions, SpecVersion{
-			WasmHash:       s.WasmHash,
-			DecodedAt:      s.DecodedAt,
-			Current:        s.WasmHash == c.CurrentWasmHash,
-			ObservedLedger: s.ObservedLedger,
-		})
+		v := SpecVersion{DecodedAt: s.DecodedAt, Current: s.WasmHash == c.CurrentWasmHash, ObservedLedger: s.ObservedLedger}
+		if s.WasmHash == model.StellarAssetContractIdentifier {
+			v.InterfaceID = s.WasmHash
+			v.Builtin = true
+		} else {
+			v.WasmHash = s.WasmHash
+		}
+		versions = append(versions, v)
 	}
 
 	sort.Slice(versions, func(i, j int) bool {

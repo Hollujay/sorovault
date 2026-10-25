@@ -41,7 +41,8 @@ type fakeRPC struct {
 	passphrase string
 
 	// failMethod, when set, makes that method return a JSON-RPC error.
-	failMethod string
+	failMethod  string
+	failMessage string
 
 	// calls records the methods invoked, so tests can assert how many round
 	// trips an operation cost.
@@ -73,7 +74,11 @@ func (f *fakeRPC) handle(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	if req.Method == f.failMethod {
-		f.writeError(w, req.ID, "simulated backend failure")
+		message := f.failMessage
+		if message == "" {
+			message = "simulated backend failure"
+		}
+		f.writeError(w, req.ID, message)
 		return
 	}
 
@@ -105,6 +110,36 @@ func (f *fakeRPC) handle(w http.ResponseWriter, r *http.Request) {
 	default:
 		f.writeError(w, req.ID, "unexpected method "+req.Method)
 	}
+}
+
+func TestRateLimitErrorsAreClassified(t *testing.T) {
+	t.Parallel()
+
+	t.Run("HTTP 429", func(t *testing.T) {
+		t.Parallel()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "slow down", http.StatusTooManyRequests)
+		}))
+		t.Cleanup(srv.Close)
+
+		f := stellar.NewRPCFetcher(srv.URL, srv.Client())
+		t.Cleanup(func() { _ = f.Close() })
+		_, err := f.WasmHash(context.Background(), testContractID)
+		require.ErrorIs(t, err, stellar.ErrRateLimited)
+	})
+
+	t.Run("JSON-RPC message", func(t *testing.T) {
+		t.Parallel()
+		fake := newFakeRPC(t)
+		fake.failMethod = "getLedgerEntries"
+		fake.failMessage = "rate limit exceeded"
+		srv := fake.start()
+
+		f := stellar.NewRPCFetcher(srv.URL, srv.Client())
+		t.Cleanup(func() { _ = f.Close() })
+		_, err := f.WasmHash(context.Background(), testContractID)
+		require.ErrorIs(t, err, stellar.ErrRateLimited)
+	})
 }
 
 func (f *fakeRPC) writeResult(w http.ResponseWriter, id json.RawMessage, result any) {
@@ -309,7 +344,7 @@ func TestFetchContractNotFound(t *testing.T) {
 	assert.Contains(t, err.Error(), testContractID)
 }
 
-func TestFetchContractNoWasm(t *testing.T) {
+func TestFetchContractStellarAssetIsBuiltin(t *testing.T) {
 	t.Parallel()
 
 	fake := newFakeRPC(t)
@@ -319,9 +354,15 @@ func TestFetchContractNoWasm(t *testing.T) {
 	f := stellar.NewRPCFetcher(srv.URL, srv.Client())
 	t.Cleanup(func() { _ = f.Close() })
 
-	_, err := f.FetchContract(context.Background(), testContractID)
-	require.ErrorIs(t, err, stellar.ErrNoWasm,
-		"a Stellar asset contract has no module and must be distinguishable from a missing one")
+	contract, err := f.FetchContract(context.Background(), testContractID)
+	require.NoError(t, err, "a Stellar asset contract is served from the built-in interface")
+	assert.True(t, contract.Builtin)
+	assert.Equal(t, stellar.BuiltinSACIdentifier, contract.WasmHash)
+	assert.Empty(t, contract.Wasm, "an asset contract has no module")
+
+	hash, err := f.WasmHash(context.Background(), testContractID)
+	require.NoError(t, err)
+	assert.Equal(t, stellar.BuiltinSACIdentifier, hash)
 }
 
 // TestFetchContractMissingCodeEntry covers an instance that points at a WASM

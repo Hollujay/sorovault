@@ -275,6 +275,10 @@ func TestDoctorDoesNotModifyTheDatabase(t *testing.T) {
 		}
 	}
 	assert.False(t, migrations.OK, "an empty schema is behind the latest migration")
+
+	// The latest version comes from the embedded migrations rather than a
+	// number written down here, so that adding a migration does not break
+	// this test.
 	latest, err := store.LatestMigrationVersion()
 	require.NoError(t, err)
 	assert.Contains(t, migrations.Error, fmt.Sprintf("version %d is available", latest))

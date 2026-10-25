@@ -2,10 +2,11 @@
 // Interface version (WASM hash): abc123
 // Built with soroban-sdk 25.3.0#dcbea44513feb7734af6b6c4aced2c4a7a2715d0
 //
-// Requires @stellar/stellar-sdk >= 14 and buffer.
+// Requires @stellar/stellar-sdk >= 14, buffer and zod >= 3.
 
 import { Buffer } from "buffer";
 import * as sdk from "@stellar/stellar-sdk/contract";
+import { z } from "zod";
 
 export const contractId = "CDZZXVGUCLBUTE3WDD6TF2NXPTBPOYTVPPBBIZMSPVIQLUG226XJ4PAN";
 export const networkName = "testnet";
@@ -119,3 +120,48 @@ export function assertSameWasm(liveHash: string): boolean {
   );
   return false;
 }
+
+/**
+ * Runtime validators for the types above (Zod 3). Values that decode
+ * into the SDK's types pass these, so a frontend can check arguments
+ * before building a transaction.
+ */
+export const ProposalSchema = z.object({
+  description: z.string(),
+  vote_count: z.bigint().min(0n).max((1n << 64n) - 1n),
+});
+export const VoteParamsSchema = z.object({
+  birth_date_lowerbound: z.bigint().min(0n).max((1n << 64n) - 1n),
+  citizenship_whitelist: z.array(z.bigint().min(0n).max((1n << 64n) - 1n)),
+  expiration_date_lower_bound: z.bigint().min(0n).max((1n << 64n) - 1n),
+  identity_counter_upper_bound: z.bigint().min(0n).max((1n << 64n) - 1n),
+  identity_ts_upper_bound: z.bigint().min(0n).max((1n << 64n) - 1n),
+  vote_scope: z.bigint().min(0n).max((1n << 64n) - 1n),
+  voting_question: z.string(),
+});
+export const voteArgsSchema = z.object({
+  voter: z.string().regex(/^[CG][A-Z2-7]{55}$/, "not a Stellar address"),
+  proposal_index: z.number().int().min(0).max(4294967295),
+  pub_signals: z.array(z.custom<Buffer>((v) => Buffer.isBuffer(v) && v.length === 32)),
+  a: z.custom<Buffer>((v) => Buffer.isBuffer(v) && v.length === 64),
+  b: z.custom<Buffer>((v) => Buffer.isBuffer(v) && v.length === 128),
+  c: z.custom<Buffer>((v) => Buffer.isBuffer(v) && v.length === 64),
+});
+export const has_votedArgsSchema = z.object({
+  nullifier: z.custom<Buffer>((v) => Buffer.isBuffer(v) && v.length === 32),
+});
+export const initializeArgsSchema = z.object({
+  admin: z.string().regex(/^[CG][A-Z2-7]{55}$/, "not a Stellar address"),
+  verifier_id: z.string().regex(/^[CG][A-Z2-7]{55}$/, "not a Stellar address"),
+  vote_params: z.lazy(() => VoteParamsSchema),
+  proposal_descriptions: z.array(z.string()),
+});
+export const get_proposalArgsSchema = z.object({
+  index: z.number().int().min(0).max(4294967295),
+});
+export const get_total_votesArgsSchema = z.object({
+});
+export const get_vote_paramsArgsSchema = z.object({
+});
+export const get_proposal_countArgsSchema = z.object({
+});

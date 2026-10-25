@@ -26,7 +26,10 @@ import (
 )
 
 func newAddCmd() *cobra.Command {
-	var asJSON bool
+	var (
+		asJSON   bool
+		fromFile string
+	)
 
 	cmd := &cobra.Command{
 		Use:   "add <contract_id>...",
@@ -37,12 +40,25 @@ embedded in it, and store the result.
 Adding a contract that is already registered is not an error: it re-checks
 the contract against the network and records a new interface version if the
 contract has been upgraded since it was last seen.`,
-		Args: cobra.MinimumNArgs(1),
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 && fromFile == "" {
+				return fmt.Errorf("at least one contract ID is required, or use --from-file")
+			}
+			return nil
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			contractIDs, err := loadContractIDs(args, fromFile, cmd.InOrStdin())
+			if err != nil {
+				return err
+			}
+			if len(contractIDs) == 0 {
+				return fmt.Errorf("no contract IDs found")
+			}
+
 			return withApp(cmd.Context(), func(ctx context.Context, a *app) error {
 				var failed int
 
-				for _, contractID := range args {
+				for _, contractID := range contractIDs {
 					fetchCtx, cancel := a.fetchContext(ctx)
 					result, err := a.registry.Register(fetchCtx, contractID)
 					cancel()
@@ -63,7 +79,7 @@ contract has been upgraded since it was last seen.`,
 				}
 
 				if failed > 0 {
-					return fmt.Errorf("%w: %d of %d contract(s) failed", errPrinted, failed, len(args))
+					return fmt.Errorf("%w: %d of %d contract(s) failed", errPrinted, failed, len(contractIDs))
 				}
 				return nil
 			})
@@ -71,7 +87,38 @@ contract has been upgraded since it was last seen.`,
 	}
 
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the full result as JSON")
+	cmd.Flags().StringVar(&fromFile, "from-file", "", "read contract IDs from a file (one per line; use - for stdin)")
 	return cmd
+}
+
+func loadContractIDs(args []string, path string, input io.Reader) ([]string, error) {
+	ids := append([]string(nil), args...)
+	if path == "" {
+		return ids, nil
+	}
+
+	reader := input
+	if path != "-" {
+		// #nosec G304 -- the CLI operator explicitly selects this input file.
+		file, err := os.Open(path)
+		if err != nil {
+			return nil, fmt.Errorf("opening contract ID file %s: %w", path, err)
+		}
+		defer func() { _ = file.Close() }()
+		reader = file
+	}
+
+	scanner := bufio.NewScanner(reader)
+	for scanner.Scan() {
+		line, _, _ := strings.Cut(scanner.Text(), "#")
+		if id := strings.TrimSpace(line); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("reading contract ID file %s: %w", path, err)
+	}
+	return ids, nil
 }
 
 func newRemoveCmd() *cobra.Command {
@@ -258,8 +305,9 @@ func printSweepSummary(w io.Writer, sum refresher.Summary) {
 
 func newRefreshCmd() *cobra.Command {
 	var (
-		asJSON bool
-		all    bool
+		asJSON   bool
+		all      bool
+		fromFile string
 	)
 
 	cmd := &cobra.Command{
@@ -277,17 +325,29 @@ contract costs a single RPC round trip: the module is only downloaded once
 its hash is known to differ.`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if all {
-				if len(args) > 0 {
-					return fmt.Errorf("--all refreshes every contract and cannot be combined with contract IDs")
+				if len(args) > 0 || fromFile != "" {
+					return fmt.Errorf("--all refreshes every contract and cannot be combined with contract IDs or --from-file")
 				}
 				return nil
 			}
-			if len(args) == 0 {
-				return fmt.Errorf("at least one contract ID is required, or use --all")
+			if len(args) == 0 && fromFile == "" {
+				return fmt.Errorf("at least one contract ID is required, or use --from-file or --all")
 			}
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			contractIDs := args
+			if !all {
+				var err error
+				contractIDs, err = loadContractIDs(args, fromFile, cmd.InOrStdin())
+				if err != nil {
+					return err
+				}
+				if len(contractIDs) == 0 {
+					return fmt.Errorf("no contract IDs found")
+				}
+			}
+
 			if all {
 				return withApp(cmd.Context(), func(ctx context.Context, a *app) error {
 					interval := a.cfg.RefreshInterval
@@ -329,7 +389,7 @@ its hash is known to differ.`,
 			return withApp(cmd.Context(), func(ctx context.Context, a *app) error {
 				var failed int
 
-				for _, contractID := range args {
+				for _, contractID := range contractIDs {
 					fetchCtx, cancel := a.fetchContext(ctx)
 					result, err := a.registry.Refresh(fetchCtx, contractID)
 					cancel()
@@ -361,7 +421,7 @@ its hash is known to differ.`,
 				}
 
 				if failed > 0 {
-					return fmt.Errorf("%w: %d of %d contract(s) failed", errPrinted, failed, len(args))
+					return fmt.Errorf("%w: %d of %d contract(s) failed", errPrinted, failed, len(contractIDs))
 				}
 				return nil
 			})
@@ -370,6 +430,7 @@ its hash is known to differ.`,
 
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the full result as JSON")
 	cmd.Flags().BoolVar(&all, "all", false, "run one sweep over every contract on the network")
+	cmd.Flags().StringVar(&fromFile, "from-file", "", "read contract IDs from a file (one per line; use - for stdin)")
 	registerContractIDCompletion(cmd, "all")
 	return cmd
 }
@@ -567,6 +628,7 @@ func newCodegenCmd() *cobra.Command {
 		wasmHash    string
 		lang        string
 		output      string
+		withZod     bool
 		asPackage   bool
 		packageName string
 		pkgVersion  string
@@ -604,6 +666,9 @@ install from a tarball.`,
 			} else if pkgVersion != "" {
 				return fmt.Errorf("--package-version only applies to --package")
 			}
+			if withZod && lang != "ts" && lang != "typescript" {
+				return fmt.Errorf("--zod generates TypeScript schemas, so it needs --lang ts")
+			}
 
 			return withApp(cmd.Context(), func(ctx context.Context, a *app) error {
 				net := network
@@ -623,12 +688,14 @@ install from a tarball.`,
 					ContractID: stored.ContractID,
 					Network:    stored.Network,
 					WasmHash:   stored.WasmHash,
+					WithZod:    withZod,
 				}
 
 				if asPackage {
 					files, err := codegen.Package(stored.Interface, src, codegen.PackageOptions{
 						Name:    packageName,
 						Version: pkgVersion,
+						WithZod: withZod,
 					})
 					if err != nil {
 						return err
@@ -682,6 +749,7 @@ install from a tarball.`,
 	cmd.Flags().StringVar(&network, "network", "", "network to read from (default: the network RPC_URL serves)")
 	cmd.Flags().StringVar(&wasmHash, "wasm-hash", "", "generate for a specific version instead of the current one")
 	cmd.Flags().StringVar(&lang, "lang", "ts", "output format (ts, md or examples)")
+	cmd.Flags().BoolVar(&withZod, "zod", false, "append Zod schemas to the TypeScript output (ts only)")
 	cmd.Flags().StringVarP(&output, "output", "o", "", "write to this file, or this directory with --package")
 	cmd.Flags().BoolVar(&asPackage, "package", false, "write a complete npm package instead of one file")
 	cmd.Flags().StringVar(&packageName, "name", "", "npm package name for --package (@scope/name)")

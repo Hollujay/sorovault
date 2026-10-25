@@ -1,10 +1,10 @@
 // Package store persists the contract registry.
 //
-// The registry keeps two things per contract: a row tracking which WASM the
-// contract currently runs, and one immutable spec row per WASM hash it has
-// ever run. Refreshing a contract therefore appends a version rather than
-// overwriting one, so an interface that was live at some point stays
-// retrievable after the contract is upgraded.
+// The registry keeps two things per contract: a row tracking its current
+// interface version identifier, and one immutable spec row per identifier it
+// has ever used. Uploaded contracts use their WASM hash; protocol-provided
+// contracts such as SACs use a stable built-in identifier. Refreshing a
+// contract therefore appends a version rather than overwriting one.
 package store
 
 import (
@@ -226,9 +226,11 @@ type WasmSpec struct {
 // SpecVersion summarises a stored spec without its body, for listing the
 // versions of a contract cheaply.
 type SpecVersion struct {
-	WasmHash  string    `json:"wasm_hash"`
-	DecodedAt time.Time `json:"decoded_at"`
-	Current   bool      `json:"current"`
+	WasmHash    string    `json:"wasm_hash,omitempty"`
+	InterfaceID string    `json:"interface_id,omitempty"`
+	Builtin     bool      `json:"builtin,omitempty"`
+	DecodedAt   time.Time `json:"decoded_at"`
+	Current     bool      `json:"current"`
 	// ObservedLedger is the ledger at observation, not the upgrade ledger.
 	ObservedLedger *uint32 `json:"observed_ledger"`
 }

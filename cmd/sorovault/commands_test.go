@@ -80,6 +80,26 @@ func TestRefreshAllCommandArgs(t *testing.T) {
 	require.NotNil(t, cmd.Flags().Lookup("json"))
 }
 
+func TestCodegenZodNeedsTypeScript(t *testing.T) {
+	t.Parallel()
+
+	// The flag Matrix runs before anything touches the database, so a
+	// plain Execute proves the validation without wiring an app.
+	cmd := newCodegenCmd()
+	require.NotNil(t, cmd.Flags().Lookup("zod"))
+
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"CDABCDEF", "--lang", "md", "--zod"})
+	require.Error(t, cmd.Execute())
+	assert.Contains(t, buf.String(), "--zod generates TypeScript schemas")
+
+	cmd = newCodegenCmd()
+	cmd.SetArgs([]string{"CDABCDEF", "--zod", "--package"})
+	require.Error(t, cmd.Execute())
+}
+
 func TestConfirmed(t *testing.T) {
 	t.Parallel()
 

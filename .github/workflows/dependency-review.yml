@@ -1,0 +1,120 @@
+name: Dependency review
+
+# Reviews what a pull request adds before it lands: a dependency with a known
+# vulnerability, or one whose licence the project does not accept. The check
+# compares the pull request against its base branch, so it only ever fails on
+# what the pull request introduced — a vulnerability that was already there is
+# somebody else's problem.
+#
+# The review comes in two parts, and this workflow runs both of them:
+#
+#   1. GitHub's dependency-review action reads the repository's dependency
+#      graph, which also carries the advisories. The graph is a repository
+#      setting (Settings -> Code security -> Dependency graph), and the
+#      organisation has not enabled it: the action's request for the graph
+#      comes back with a 403 and it fails with "Dependency review is not
+#      supported on this repository".
+#   2. .github/scripts/dependency-review.sh answers the licence half of the
+#      question from the manifests the repository keeps, so a pull request is
+#      not held up by a setting nobody has turned on.
+#
+# The workflow asks the same API the action asks, with the same token, and
+# reads the answer from the status code:
+#
+#   200 - the graph is there, and the action does the review.
+#   403 - the graph is off, and the script does the review.
+#
+# Both read the same policy from .github/dependency-review-config.yml, so the
+# licences the project accepts are written down once. Enabling the graph is
+# enough to switch the workflow over to the action; nothing else changes.
+#
+# The policy is loaded from the base branch, not from the pull request being
+# judged, the same way the malware scan loads its scanner. A pull request
+# cannot widen the list of accepted licences to get its own dependency
+# through.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-review:
+    name: Dependency review
+    runs-on: ubuntu-latest
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The policy and the script are the rules the pull request is judged by,
+      # so they come from the base branch. The fallbacks cover the pull
+      # request that introduces them, which cannot have them on the base
+      # branch yet.
+      - name: Load the review policy from the base branch
+        run: |
+          git show "$BASE_SHA:.github/dependency-review-config.yml" \
+            > "$RUNNER_TEMP/dependency-review-config.yml" 2>/dev/null \
+            || cp .github/dependency-review-config.yml "$RUNNER_TEMP/dependency-review-config.yml"
+          git show "$BASE_SHA:.github/scripts/dependency-review.sh" \
+            > "$RUNNER_TEMP/dependency-review.sh" 2>/dev/null \
+            || cp .github/scripts/dependency-review.sh "$RUNNER_TEMP/dependency-review.sh"
+
+      - name: Check whether the dependency graph is available
+        id: graph
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          code=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/dependency-graph/compare/$BASE_SHA...$HEAD_SHA") \
+            || code=000
+          echo "dependency graph: HTTP $code"
+          case "$code" in
+            200)
+              echo "available=true" >> "$GITHUB_OUTPUT"
+              ;;
+            403)
+              # The graph is switched off. The action would fail with a 403
+              # here, so the script reviews the change instead.
+              echo "available=false" >> "$GITHUB_OUTPUT"
+              echo "::notice::the repository's dependency graph is disabled, so the review runs from the manifests in the repository; a maintainer can enable it under Settings -> Code security -> Dependency graph"
+              ;;
+            *)
+              # Anything else is not the graph being off, and the action is
+              # better at explaining what it is than this step is.
+              echo "available=true" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - name: Review dependency changes
+        if: steps.graph.outputs.available == 'true'
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          repo-token: ${{ github.token }}
+          # The policy the action applies, and the policy the script applies
+          # when the graph is off.
+          config-file: ${{ runner.temp }}/dependency-review-config.yml
+
+      - name: Set up Go
+        if: steps.graph.outputs.available != 'true'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26"
+          cache: true
+          # Always the newest patch release: security fixes land there.
+          check-latest: true
+
+      - name: Review dependency changes without the dependency graph
+        if: steps.graph.outputs.available != 'true'
+        run: |
+          bash "$RUNNER_TEMP/dependency-review.sh" \
+            "$BASE_SHA" "$HEAD_SHA" "$RUNNER_TEMP/dependency-review-config.yml"

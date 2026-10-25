@@ -50,8 +50,11 @@ func TestLiveSmoke(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, contract.WasmHash, hash)
 
-	// The native XLM asset contract is built into the host and has no WASM.
+	// The native XLM asset contract is built into the host: it has no WASM
+	// and is served from the built-in interface instead.
 	const nativeSAC = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
-	_, err = fetcher.FetchContract(ctx, nativeSAC)
-	assert.ErrorIs(t, err, ErrNoWasm)
+	sac, err := fetcher.FetchContract(ctx, nativeSAC)
+	require.NoError(t, err)
+	assert.True(t, sac.Builtin)
+	assert.Equal(t, BuiltinSACIdentifier, sac.WasmHash)
 }

@@ -90,6 +90,24 @@ Nothing exotic — write Go that looks like the Go already here.
   way, since it is what external consumers of the ABI mirror.
 - **Log with `slog`**, and pass the logger in rather than reaching for a global.
 
+### GitHub Actions
+
+An action is pinned to a full commit SHA, with the version in a trailing
+comment:
+
+```yaml
+- uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+```
+
+A tag is a mutable name, so pinning to one lets whoever can move the tag
+decide what CI runs — and the release job holds a token that can write to
+this repository. Dependabot still updates pinned actions: it rewrites the
+SHA and the comment together.
+
+Each workflow and job also declares the permissions it needs, and no more:
+`contents: read` is enough for almost every job here, and a job that
+really writes something says so.
+
 ## Testing
 
 The rules that matter:

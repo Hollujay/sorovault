@@ -101,21 +101,30 @@ func startRefresher(ctx context.Context, a *app) (r *refresher.Refresher, stop f
 		return nil, nil, err
 	}
 
-	ctx, cancel := context.WithCancel(ctx)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		_ = r.Run(ctx)
-	}()
-
+	stop = startRefresherLoop(ctx, a.cfg.RefreshInterval, r.Run)
 	a.log.Info("automatic refresh enabled",
 		"interval", a.cfg.RefreshInterval,
 		"events", a.cfg.RefreshEvents,
 		"events_interval", a.cfg.RefreshEventsInterval)
-	return r, func() {
+	return r, stop, nil
+}
+
+func startRefresherLoop(ctx context.Context, interval time.Duration, run func(context.Context) error) func() {
+	if interval <= 0 {
+		return func() {}
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = run(ctx)
+	}()
+
+	return func() {
 		cancel()
 		<-done
-	}, nil
+	}
 }
 
 // refreshNotifier builds the webhook a sweep posts upgrades to, if one is

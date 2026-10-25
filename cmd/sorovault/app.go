@@ -34,10 +34,19 @@ func newApp(ctx context.Context) (*app, error) {
 	log := cfg.NewLogger(os.Stderr)
 	slog.SetDefault(log)
 
-	db, err := store.NewPostgres(ctx, cfg.DatabaseURL)
+	db, err := store.NewPostgres(ctx, cfg.DatabaseURL, store.PoolOptions{
+		MaxConns: cfg.DatabaseMaxConns,
+		MinConns: cfg.DatabaseMinConns,
+	})
 	if err != nil {
 		return nil, err
 	}
+
+	// The pool in force is not always the one that was configured: pgx has
+	// defaults of its own, and the connection string can carry a size too.
+	// Logging the resolved numbers says which the process actually got.
+	pool := db.PoolConfig()
+	log.Info("database pool ready", "max_conns", pool.MaxConns, "min_conns", pool.MinConns)
 
 	fetcher := stellar.NewRPCFetcher(cfg.RPCURL, nil)
 
@@ -96,7 +105,10 @@ func withStore(ctx context.Context, fn func(context.Context, store.Store) error)
 		return err
 	}
 
-	db, err := store.NewPostgres(ctx, cfg.DatabaseURL)
+	db, err := store.NewPostgres(ctx, cfg.DatabaseURL, store.PoolOptions{
+		MaxConns: cfg.DatabaseMaxConns,
+		MinConns: cfg.DatabaseMinConns,
+	})
 	if err != nil {
 		return err
 	}

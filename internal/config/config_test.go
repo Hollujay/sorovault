@@ -30,6 +30,7 @@ func setEnv(t *testing.T, vars map[string]string) {
 		"REFRESH_WEBHOOK_SECRET", "REFRESH_EVENTS", "REFRESH_EVENTS_INTERVAL",
 		"SIGNING_KEY", "SIGNING_KEY_FILE", "SIGNING_RETIRED_KEYS",
 		"CORS_ORIGINS", "RATE_LIMIT_PER_MINUTE", "RATE_LIMIT_BURST", "TRUST_X_FORWARDED_FOR",
+		"DATABASE_MAX_CONNS", "DATABASE_MIN_CONNS",
 	} {
 		if v, ok := vars[key]; ok {
 			t.Setenv(key, v)
@@ -55,6 +56,8 @@ func TestLoadDefaults(t *testing.T) {
 	assert.Zero(t, cfg.RefreshInterval, "automatic refresh is opt-in")
 	assert.Zero(t, cfg.MaxConcurrentRegistrations,
 		"the concurrency limit is left to the registry unless it is configured")
+	assert.Zero(t, cfg.DatabaseMaxConns, "the pool size is left to pgx unless it is configured")
+	assert.Zero(t, cfg.DatabaseMinConns, "the pool size is left to pgx unless it is configured")
 	assert.Empty(t, cfg.CORSOrigins, "CORS is opt-in")
 	assert.Equal(t, config.DefaultRateLimitPerMinute, cfg.RateLimitPerMinute)
 	assert.Equal(t, config.DefaultRateLimitBurst, cfg.RateLimitBurst)
@@ -156,6 +159,129 @@ func TestMaxConcurrentRegistrations(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, cfg.MaxConcurrentRegistrations)
+		})
+	}
+}
+
+func TestDatabasePoolSize(t *testing.T) {
+	tests := []struct {
+		name    string
+		max     string
+		min     string
+		wantMax int32
+		wantMin int32
+		wantErr string
+	}{
+		{
+			name: "unset leaves pgx's own default alone",
+		},
+		{
+			name:    "both set",
+			max:     "20",
+			min:     "5",
+			wantMax: 20,
+			wantMin: 5,
+		},
+		{
+			name:    "maximum only",
+			max:     "20",
+			wantMax: 20,
+		},
+		{
+			name:    "minimum only",
+			min:     "5",
+			wantMin: 5,
+		},
+		{
+			name:    "minimum equal to the maximum",
+			max:     "4",
+			min:     "4",
+			wantMax: 4,
+			wantMin: 4,
+		},
+		{
+			name:    "smallest maximum",
+			max:     "1",
+			wantMax: 1,
+		},
+		{
+			name:    "largest maximum",
+			max:     "10000",
+			wantMax: 10000,
+		},
+		{
+			name:    "zero minimum",
+			min:     "0",
+			wantMin: 0,
+		},
+		{
+			name:    "surrounding space is ignored",
+			max:     " 12 ",
+			wantMax: 12,
+		},
+		{
+			name:    "minimum above the maximum",
+			max:     "2",
+			min:     "3",
+			wantErr: "cannot be greater than",
+		},
+		{
+			name:    "zero maximum",
+			max:     "0",
+			wantErr: "must be between",
+		},
+		{
+			name:    "negative maximum",
+			max:     "-1",
+			wantErr: "must be between",
+		},
+		{
+			name:    "maximum above the limit",
+			max:     "10001",
+			wantErr: "must be between",
+		},
+		{
+			name:    "minimum above the limit",
+			min:     "10001",
+			wantErr: "must be between",
+		},
+		{
+			name:    "maximum is not a number",
+			max:     "many",
+			wantErr: "DATABASE_MAX_CONNS",
+		},
+		{
+			name:    "minimum is not a number",
+			min:     "few",
+			wantErr: "DATABASE_MIN_CONNS",
+		},
+		{
+			name:    "maximum is not a whole number",
+			max:     "1.5",
+			wantErr: "DATABASE_MAX_CONNS",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			vars := map[string]string{"DATABASE_URL": testDatabaseURL}
+			if tt.max != "" {
+				vars["DATABASE_MAX_CONNS"] = tt.max
+			}
+			if tt.min != "" {
+				vars["DATABASE_MIN_CONNS"] = tt.min
+			}
+			setEnv(t, vars)
+
+			cfg, err := config.Load()
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantMax, cfg.DatabaseMaxConns)
+			assert.Equal(t, tt.wantMin, cfg.DatabaseMinConns)
 		})
 	}
 }

@@ -38,6 +38,25 @@ const (
 	LogFormatJSON = "json"
 )
 
+// Bounds on the connection pool sizes accepted from the environment.
+//
+// The sizes themselves default to zero, which means "not configured": pgx
+// picks its own default, the greater of 4 or the number of CPUs for the
+// maximum and none for the minimum. That default is deliberately not spelled
+// out here, because pgx derives it from the machine the process runs on and
+// a copy frozen into this file would be right for one host and wrong for
+// another.
+const (
+	// MinDatabaseMaxConns is the smallest maximum accepted: a pool of
+	// zero connections could not serve a request.
+	MinDatabaseMaxConns = 1
+	// MaxDatabaseConns is the largest size accepted, for the maximum or
+	// the minimum. A registry serving a busy API does not need a pool of
+	// tens of thousands of connections, so a value this large is nearly
+	// always a typo.
+	MaxDatabaseConns = 10000
+)
+
 // Config is the resolved runtime configuration.
 type Config struct {
 	// RPCURL is the Stellar RPC endpoint contract code is read from.
@@ -53,6 +72,12 @@ type Config struct {
 	// may run at once, across every client. Zero means unset, and the
 	// registry's own default applies.
 	MaxConcurrentRegistrations int
+	// DatabaseMaxConns is the maximum number of connections the registry's
+	// pool holds open. Zero means unset, and pgx's own default applies.
+	DatabaseMaxConns int32
+	// DatabaseMinConns is the number of connections the pool keeps open
+	// between requests. Zero means unset, and pgx's own default applies.
+	DatabaseMinConns int32
 	// HTTPAddr is the address the API and browse UI listen on.
 	HTTPAddr string
 	// PublicURL is the externally reachable origin for link previews and sitemaps.
@@ -222,6 +247,24 @@ func Load() (*Config, error) {
 	if err := loadSigning(cfg); err != nil {
 		return nil, err
 	}
+
+	maxConns, err := envPoolSize("DATABASE_MAX_CONNS", MinDatabaseMaxConns)
+	if err != nil {
+		return nil, err
+	}
+	minConns, err := envPoolSize("DATABASE_MIN_CONNS", 0)
+	if err != nil {
+		return nil, err
+	}
+	// A pool cannot hold more connections than its maximum, so a minimum
+	// above it is a configuration mistake rather than something to
+	// reconcile at connect time.
+	if maxConns > 0 && minConns > maxConns {
+		return nil, fmt.Errorf("config: DATABASE_MIN_CONNS (%d) cannot be greater than DATABASE_MAX_CONNS (%d)",
+			minConns, maxConns)
+	}
+	cfg.DatabaseMaxConns = maxConns
+	cfg.DatabaseMinConns = minConns
 
 	if cfg.PublicURL != "" {
 		parsed, err := url.Parse(cfg.PublicURL)
@@ -489,6 +532,28 @@ func envInt(name string, min, max int) (int, error) {
 			name, min, max, n)
 	}
 	return n, nil
+}
+
+// envPoolSize reads a connection pool size from the environment.
+//
+// An unset or empty variable yields zero, which means "leave pgx's default
+// alone". A value that is not a number, or that falls outside the accepted
+// range, is an error: a pool that is too small cannot serve a request, and
+// one that is too large is nearly always a typo.
+func envPoolSize(name string, min int32) (int32, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return 0, nil
+	}
+	n, err := strconv.ParseInt(raw, 10, 32)
+	if err != nil {
+		return 0, fmt.Errorf("config: %s %q: %w", name, raw, err)
+	}
+	if n < int64(min) || n > int64(MaxDatabaseConns) {
+		return 0, fmt.Errorf("config: %s must be between %d and %d, got %d",
+			name, min, MaxDatabaseConns, n)
+	}
+	return int32(n), nil
 }
 
 func parseLogFormat(s string) (string, error) {

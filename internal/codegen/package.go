@@ -20,6 +20,9 @@ type PackageOptions struct {
 	// Version is the package version. Empty derives one from the WASM hash
 	// with PackageVersion.
 	Version string
+	// WithZod generates the client's runtime Zod schemas and pins zod as
+	// a dependency, so the package validates values without extra setup.
+	WithZod bool
 }
 
 // File is one file of a generated package, at a path relative to the
@@ -89,6 +92,7 @@ func Package(iface *model.Interface, src Source, opts PackageOptions) ([]File, e
 		return nil, fmt.Errorf("codegen: %q is not a valid semantic version", opts.Version)
 	}
 
+	src.WithZod = opts.WithZod
 	client, err := TypeScript(iface, src)
 	if err != nil {
 		return nil, err
@@ -123,6 +127,12 @@ func Package(iface *model.Interface, src Source, opts PackageOptions) ([]File, e
 			"buffer":               pinned.buffer,
 			"typescript":           pinned.typescript,
 		},
+	}
+	if opts.WithZod {
+		manifest.PeerDependencies["zod"] = zodVersion
+		manifest.DevDependencies["zod"] = zodVersion
+		manifest.Description += " Includes Zod schemas for runtime validation."
+		manifest.Keywords = append(manifest.Keywords, "zod")
 	}
 
 	manifestJSON, err := json.MarshalIndent(manifest, "", "  ")
@@ -191,6 +201,9 @@ func packageReadme(name, version string, src Source) string {
 	b.WriteString(name)
 	b.WriteString("\n```\n\n")
 	b.WriteString("`@stellar/stellar-sdk` and `buffer` are peer dependencies, so the package\nuses the SDK version your project already depends on.\n\n")
+	if src.WithZod {
+		b.WriteString("The schemas this package ships are Zod schemas, so `zod` is a peer\ndependency as well.\n\n")
+	}
 
 	b.WriteString("## Use\n\n")
 	b.WriteString("```ts\n")
@@ -212,6 +225,14 @@ func packageReadme(name, version string, src Source) string {
 
 	return b.String()
 }
+
+// zodVersion pins the validator package a --zod generation requires, as a
+// peer and dev dependency, so the schema-carrying client type-checks with
+// exactly the API surface the generator emits. It lives here rather than
+// in testdata/package.json because that manifest is a protected path: the
+// golden typecheck compiles the plain flavour only, nothing below needs
+// zod there, and keeping it out keeps automated merges working.
+const zodVersion = "3.25.76"
 
 // pinnedVersions is the SDK, buffer and compiler versions the golden client
 // is type-checked against.

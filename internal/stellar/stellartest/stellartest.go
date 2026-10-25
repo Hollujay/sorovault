@@ -27,6 +27,7 @@ type Fake struct {
 
 	contracts map[string][]byte
 	wasm      map[string][]byte
+	builtins  map[string]bool
 
 	// Passphrase is what Network reports. It defaults to testnet.
 	Passphrase string
@@ -76,6 +77,7 @@ func New() *Fake {
 		wasm:       map[string][]byte{},
 		origins:    map[string]stellar.Origin{},
 		ledger:     1000,
+		builtins:   map[string]bool{},
 		Passphrase: stellar.NetworkTestnet,
 		Calls:      map[string]int{},
 	}
@@ -95,6 +97,16 @@ func (f *Fake) Deploy(contractID string, wasmModule []byte) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.contracts[contractID] = wasmModule
+	delete(f.builtins, contractID)
+}
+
+// DeploySAC makes contractID resolve to a protocol-provided Stellar Asset
+// Contract with no uploaded WASM.
+func (f *Fake) DeploySAC(contractID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.contracts, contractID)
+	f.builtins[contractID] = true
 }
 
 // Upgrade replaces a contract's module, as an on-chain upgrade would. The
@@ -209,6 +221,7 @@ func (f *Fake) Remove(contractID string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.contracts, contractID)
+	delete(f.builtins, contractID)
 }
 
 // FetchContract implements stellar.Fetcher.
@@ -235,6 +248,9 @@ func (f *Fake) FetchContract(ctx context.Context, contractID string) (*stellar.C
 
 	module, ok := f.contracts[contractID]
 	if !ok {
+		if f.builtins[contractID] {
+			return &stellar.Contract{ID: contractID, WasmHash: stellar.BuiltinSACIdentifier, Builtin: true}, nil
+		}
 		return nil, fmt.Errorf("%w: %s", stellar.ErrContractNotFound, contractID)
 	}
 
@@ -291,6 +307,9 @@ func (f *Fake) WasmHash(ctx context.Context, contractID string) (string, error) 
 
 	module, ok := f.contracts[contractID]
 	if !ok {
+		if f.builtins[contractID] {
+			return stellar.BuiltinSACIdentifier, nil
+		}
 		return "", fmt.Errorf("%w: %s", stellar.ErrContractNotFound, contractID)
 	}
 	return HashOf(module), nil

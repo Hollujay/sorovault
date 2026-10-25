@@ -84,8 +84,15 @@ Worth writing down, because it is the part that is easy to get wrong:
    contract's `ScAddress`, the key `ScvLedgerKeyContractInstance`, and
    `Persistent` durability. `getLedgerEntries` returns a `ContractDataEntry`
    whose `Val.Instance.Executable.WasmHash` names the module.
-   - A Stellar asset contract has no `WasmHash` — it is built into the host, so
-     there is no interface to decode. SoroVault reports this distinctly.
+   - A Stellar Asset Contract has no `WasmHash` — it is built into the host, so
+     there is no uploaded interface to decode. SoroVault recognizes the on-ledger
+     `CONTRACT_EXECUTABLE_STELLAR_ASSET` discriminant and serves the documented
+     built-in interface under the stable identifier
+     `builtin:stellar-asset-contract:v1`. Its interface JSON is marked
+     `builtin: true` and cites the [official SAC specification](https://developers.stellar.org/docs/tokens/stellar-asset-contract).
+     Registering an SAC now returns its interface instead of the previous HTTP
+     422 response; `wasm_hash` is omitted from the contract interface response
+     and `interface_id` identifies the built-in definition.
 2. **Contract code.** Build a `LedgerKey` for `ContractCode` keyed by that hash.
    `getLedgerEntries` returns a `ContractCodeEntry` holding the module bytes.
    The hash is the SHA-256 of the module, which is what makes it a usable
@@ -203,6 +210,8 @@ All configuration is environment variables. Only `DATABASE_URL` (or the path in 
 |---|---|---|
 | `DATABASE_URL` | — | Postgres connection string. **Required** (or set `DATABASE_URL_FILE` to read it from a file). |
 | `MAX_CONCURRENT_REGISTRATIONS` | `4` | how many registrations and refreshes run at once |
+| `DATABASE_MAX_CONNS` | pgx's own (the greater of 4 or the CPU count) | most connections the pool holds open |
+| `DATABASE_MIN_CONNS` | `0` | connections the pool keeps open between requests |
 | `RPC_URL` | `https://soroban-testnet.stellar.org` | Stellar RPC endpoint |
 | `NETWORK_PASSPHRASE` | `Test SDF Network ; September 2015` | the network you expect `RPC_URL` to serve |
 | `HTTP_ADDR` | `:8080` | listen address |
@@ -233,6 +242,11 @@ within the interval. An upgraded contract gets a new interface version
 exactly as `POST /api/contracts/{id}/refresh` would record it; an unchanged
 one costs a single `getLedgerEntries` call and is not re-downloaded. Refreshes
 are spread at even offsets across the interval to avoid an RPC traffic burst.
+
+A rate-limited RPC response pauses the sweep and retries that contract with
+exponential backoff, capped at 16 seconds. After five retries, the sweep stops
+and leaves remaining contracts stale for the next scheduled sweep; the rate
+limit is logged once rather than once per contract.
 
 A contract that fails to refresh — expired, or an RPC error — is logged and
 skipped, and the sweep carries on. One sweep runs at startup and then one per
@@ -480,6 +494,58 @@ picks it up on the next sweep, since a contract that was not refreshed stays
 stale. The browse UI's registration form draws on the same budget and shows
 the same **503**, with the `Retry-After` header, inline on the page.
 
+### Connection pool
+
+SoroVault talks to Postgres through pgx's pool. Two variables size it:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DATABASE_MAX_CONNS` | pgx's own (the greater of 4 or the CPU count) | the most connections the pool holds open |
+| `DATABASE_MIN_CONNS` | `0` | the connections the pool keeps open between requests |
+
+Both are optional. Leaving them unset changes nothing: pgx sizes the pool,
+as it always has — the greater of 4 or the CPU count for the maximum, and
+none for the minimum. A value that is not a whole number, or that falls
+outside the accepted range — `1` to `10000` for the maximum, `0` to `10000`
+for the minimum — is a startup error rather than a silent fallback, and so
+is a minimum above the maximum.
+
+**Precedence.** pgx also reads `pool_max_conns` and `pool_min_conns` from
+the connection string:
+
+```text
+postgres://…/sorovault?sslmode=disable&pool_max_conns=8
+```
+
+The environment wins. `DATABASE_MAX_CONNS`, when it is set, replaces
+whatever `pool_max_conns` says, and `DATABASE_MIN_CONNS` replaces
+`pool_min_conns`. When the environment variable is unset the connection
+string's parameter applies, and when that is absent too, pgx's own default
+does. A connection string is often shared with other tools, so this keeps
+one deployment's settings from moving another's.
+
+**Sizing.** A Postgres connection is a server-side process: each one costs
+a few megabytes of memory on the server and a file descriptor on both ends.
+A sensible maximum is therefore well below the database's own
+`max_connections` (100 by default), leaving room for the migrations, the
+`psql` sessions and the monitoring that share the same server.
+
+SoroVault is mostly read-only — API reads are short queries, and a refresh
+sweep is the only sustained traffic — so the default pool is usually
+enough. Raise `DATABASE_MAX_CONNS` when requests queue behind a busy pool
+(`pool timeout` errors, or latency that grows with load), not because the
+number sounds better. Lower it on a small managed database, where the
+connection limit is often lower than Postgres's own default.
+
+Connections are opened on demand, so a large maximum costs nothing until
+the traffic arrives. `DATABASE_MIN_CONNS` keeps that many open between
+requests, which saves the handshake on the first request after an idle
+period; it is worth setting only when that latency matters and the database
+can afford the connections.
+
+The `migrate` command does not use this pool: it opens its own connection
+through golang-migrate, and migrations are short-lived either way.
+
 ## HTTP API
 
 | Method | Path | Purpose |
@@ -649,13 +715,14 @@ beside it.
 ## CLI
 
 ```console
-sorovault add <contract_id>...      # fetch, decode and register
+sorovault add <contract_id>...      # fetch, decode and register (--from-file)
 sorovault remove <contract_id>      # delete a contract and its versions (--yes)
-sorovault refresh <contract_id>...  # re-check for an upgraded interface
+sorovault refresh <contract_id>...  # re-check for an upgraded interface (--from-file)
 sorovault refresh --all             # one sweep over every contract (--json)
 sorovault list                      # -q, --function, --type, --network, --limit, --offset
 sorovault get <contract_id>         # --function, --wasm-hash, --json
 sorovault versions <contract_id>    # --network, --json
+sorovault codegen <contract_id>     # --lang ts|md|examples; -o, --wasm-hash, --package, --zod
 sorovault codegen <contract_id>     # --lang ts|md|examples; -o, --wasm-hash, --package
 sorovault check-client <client.ts>  # --contract, --api, --network; exits non-zero when stale
 sorovault export [file]             # versioned JSON backup (-o)
@@ -670,7 +737,9 @@ sorovault doctor                    # check a deployment's health
 ```
 
 `add` and `refresh` accept several contract IDs and report per-contract
-failures without abandoning the rest. `list` takes `--function` and `--type`
+failures without abandoning the rest. Both accept `--from-file path` to read
+additional IDs, one per line; blank lines and lines beginning with `#` are
+ignored, and `--from-file -` reads standard input. `list` takes `--function` and `--type`
 for the same exact-name filters the API offers. Every read command takes
 `--json`, which emits exactly what the API serves:
 
@@ -842,6 +911,29 @@ Type mappings follow the Stellar CLI's own bindings (`u64`→`bigint`,
 the SDK unchanged. It requires `@stellar/stellar-sdk` 14 or later and
 `buffer`.
 
+### Runtime validation
+
+TypeScript types disappear at compile time, but a frontend taking user input
+before building a transaction can validate against the same shapes at
+runtime with `--zod` (or `client.ts?zod=1` over the API). The generated file
+gains a schemas section — one Zod schema per struct, union and enum, plus
+one per function's argument list — with the widths enforced exactly:
+integer bounds at each kind's limits and exact byte lengths for
+`BytesN<N>`:
+
+```ts
+import { voteArgsSchema } from "./zkvote";
+
+const args = voteArgsSchema.parse(JSON.parse(input)); // throws before anything ships
+const tx = await client.vote(args);
+```
+
+A schema for a user-defined type references the others through `z.lazy`, so
+recursive interfaces stay legal, and the section compiles standalone: with
+`--zod` the file imports `zod` itself, and a package generated with
+`--package --zod` pins `zod` as a peer dependency at the same version CI
+type-checks the golden validators against.
+
 ### Staleness checks
 
 Every generated file embeds the interface version it was built from: the
@@ -865,6 +957,7 @@ if (!assertSameWasm(meta.wasm_hash)) {
 Checking is opt-in: nothing happens unless the application calls it, so
 offline use stays untouched, and a project that commits its client keeps it
 byte-identical until the interface actually changes.
+
 ### Checking a committed client for staleness
 
 Generated clients embed the WASM hash they were built for as the `wasmHash`
@@ -934,9 +1027,17 @@ selectable text.
 
 `POST /api/wasm/{hash}` catalogs uploaded code by its 64-character SHA-256
 hash, even before a contract instance uses it. Its decoded interface is then
-available from `GET /api/wasm/{hash}`. Attach a contract repository URL and an
-optional 40- or 64-character commit hash with `PUT /api/contracts/{id}/source`;
-the browse page displays the repository and commit with the interface.
+available from `GET /api/wasm/{hash}`. To see what a module would expose
+before it is ever deployed — a doc comment that should have rendered, a type
+that should have changed — `POST /api/decode` with the file as the request
+body (raw or as a `multipart/form-data` file) answers with the ABI JSON and
+stores nothing; `?format=ts` returns the generated TypeScript client
+instead. The body is limited to 512 KiB, four times the 128 KiB the network
+allows as contract code.
+
+Attach a contract repository URL and an optional 40- or 64-character commit
+hash with `PUT /api/contracts/{id}/source`; the browse page displays the
+repository and commit with the interface.
 
 ## The ABI JSON
 
