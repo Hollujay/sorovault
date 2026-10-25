@@ -52,7 +52,7 @@ func Rust(iface *model.Interface, src Source) (string, error) {
 	for _, e := range iface.Types.Enums {
 		fmt.Fprintf(&b, "pub enum %s {\n", e.Name)
 		for _, c := range e.Cases {
-			fmt.Fprintf(&b, "\t%s\n", c.Name)
+			fmt.Fprintf(&b, "\t%s = %d,\n", c.Name, c.Value)
 		}
 		fmt.Fprintf(&b, "}\n\n")
 	}
@@ -64,6 +64,9 @@ func Rust(iface *model.Interface, src Source) (string, error) {
 	fmt.Fprintf(&b, "    address: String,\n")
 	fmt.Fprintf(&b, "}\n\n")
 
+	// The client's methods live in an impl block: Self and &self mean
+	// nothing outside one.
+	fmt.Fprintf(&b, "impl Client {\n")
 	fmt.Fprintf(&b, "/// Connect to a contract address.\n")
 	fmt.Fprintf(&b, "pub fn connect(address: String) -> Self {\n")
 	fmt.Fprintf(&b, "    Self {\n")
@@ -80,6 +83,7 @@ func Rust(iface *model.Interface, src Source) (string, error) {
 	fmt.Fprintf(&b, "pub fn call(&self, fn_name: String, args: Vec<u8>) -> Result<Vec<u8>, soroban_sdk::Error> {\n")
 	fmt.Fprintf(&b, "    let client = contractclient::Client::new(self.address);\n")
 	fmt.Fprintf(&b, "    client.call(fn_name, args)\n")
+	fmt.Fprintf(&b, "}\n")
 	fmt.Fprintf(&b, "}\n")
 
 	return b.String(), nil
