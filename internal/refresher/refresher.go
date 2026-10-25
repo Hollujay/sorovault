@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -375,10 +376,6 @@ func (r *Refresher) recordRefresh(ctx context.Context, network string, contract 
 // keep the registry up to date, and how fast a receiver reads about it is
 // the receiver's business.
 func (r *Refresher) notify(ctx context.Context, network string, result *registry.Result) {
-	if r.notifier == nil {
-		return
-	}
-
 	change := Change{
 		ContractID:   result.Contract.ContractID,
 		Network:      network,
@@ -388,9 +385,44 @@ func (r *Refresher) notify(ctx context.Context, network string, result *registry
 		ChangedAt:    r.now().UTC(),
 	}
 
+	r.notifySubscribers(ctx, change)
+	if r.notifier == nil {
+		return
+	}
+
 	if err := r.notifier.Notify(ctx, change); err != nil {
 		r.log.WarnContext(ctx, "refresh webhook failed",
 			"contract_id", change.ContractID, "network", network, "error", err)
+	}
+}
+
+// notifySubscribers delivers a change to every active subscription on the
+// change's network that covers the contract, signed with the subscription's
+// secret. A failed delivery is logged like the global webhook's: the sweep
+// does not wait on a receiver.
+func (r *Refresher) notifySubscribers(ctx context.Context, change Change) {
+	db := r.reg.Store()
+	items, err := db.ListSubscriptions(ctx)
+	if err != nil {
+		r.log.WarnContext(ctx, "listing webhook subscriptions failed", "error", err)
+		return
+	}
+	for _, item := range items {
+		if !item.Active || item.Network != change.Network {
+			continue
+		}
+		sub, err := db.GetSubscription(ctx, item.ID)
+		if err != nil {
+			r.log.WarnContext(ctx, "reading webhook subscription failed", "subscription", item.ID, "error", err)
+			continue
+		}
+		if !slices.Contains(sub.ContractIDs, change.ContractID) {
+			continue
+		}
+		if err := deliverWebhook(ctx, sub.URL, sub.ID, change, r.now, r.log, nil, 0); err != nil {
+			r.log.WarnContext(ctx, "subscription webhook failed",
+				"contract_id", change.ContractID, "error", err)
+		}
 	}
 }
 

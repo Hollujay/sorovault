@@ -1,4 +1,4 @@
-# SoroVault
+#SoroVault
 
 [![CI](https://github.com/soroworks/sorovault/actions/workflows/ci.yml/badge.svg)](https://github.com/soroworks/sorovault/actions/workflows/ci.yml)
 [![Security](https://github.com/soroworks/sorovault/actions/workflows/security.yml/badge.svg)](https://github.com/soroworks/sorovault/actions/workflows/security.yml)
@@ -18,7 +18,7 @@ for where contributions are most welcome.
 
 ---
 
-## Why
+# # Why
 
 A deployed Soroban contract is a black box unless you have its interface.
 
@@ -43,7 +43,7 @@ $ curl -s localhost:8080/api/contracts/CDZZ…4PAN | jq '.interface.functions[].
 It is the discovery layer for contract interfaces, and the natural companion to
 a deployer (SoroForge) and a simulator (SoroProbe).
 
-## What it does
+##What it does
 
 - **Register** a contract by ID — fetch its WASM, decode the interface, store it
 - **Search** the registry by contract ID or name

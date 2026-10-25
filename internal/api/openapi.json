@@ -106,6 +106,38 @@
         }
       }
     },
+    "/api/subscriptions": {
+      "post": {
+        "summary": "Register a webhook URL for a set of contracts",
+        "description": "Registers a webhook URL that will be notified when any of the specified contracts' interfaces change. Returns a secret used to sign deliveries.",
+        "operationId": "subscribeContract",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SubscribeRequest" } } } },
+        "responses": {
+          "200": { "description": "Subscription registered.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SubscribeResponse" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }
+        }
+      },
+      "get": {
+        "summary": "List subscriptions",
+        "description": "Lists all webhook subscriptions.",
+        "operationId": "listSubscriptions",
+        "responses": {
+          "200": { "description": "A page of subscriptions.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SubscriptionListResponse" } } } }
+        }
+      }
+    },
+    "/api/subscriptions/{secret}": {
+      "delete": {
+        "summary": "Unsubscribe by secret",
+        "description": "Removes a webhook subscription by its secret.",
+        "parameters": [{ "name": "secret", "in": "path", "required": true, "description": "The secret returned when the subscription was created.", "schema": { "type": "string" } }],
+        "operationId": "unsubscribeContract",
+        "responses": {
+          "200": { "description": "Subscription removed.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SubscribeResponse" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }
+        }
+      }
+    },
     "/api/decode": {
       "post": {
         "summary": "Decode an uploaded WASM module without storing it",
@@ -612,6 +644,41 @@
       } }
     },
     "schemas": {
+      "SubscribeRequest": {
+        "type": "object",
+        "properties": {
+          "contract_ids": { "type": "array", "items": { "$ref": "#/components/schemas/ContractID" }, "minItems": 1, "maxItems": 20, "description": "Contract IDs to subscribe to" },
+          "url": { "type": "string", "format": "uri", "description": "Webhook endpoint URL" }
+        },
+        "required": ["contract_ids", "url"],
+        "additionalProperties": false
+      },
+      "SubscribeResponse": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "description": "Subscription secret/ID" },
+          "network": { "type": "string", "description": "Network namespace" },
+          "contracts": { "type": "integer", "description": "Number of contracts subscribed to" },
+          "active": { "type": "boolean", "description": "Whether the subscription is active" }
+        },
+        "required": ["id", "network"]
+      },
+      "SubscriptionListResponse": {
+        "type": "object",
+        "properties": { "subscriptions": { "type": "array", "items": { "$ref": "#/components/schemas/SubscriptionListItem" }, "description": "List of subscriptions" } },
+        "required": ["subscriptions"]
+      },
+      "SubscriptionListItem": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "description": "Always empty in listings: the ID is the subscription's secret." },
+          "network": { "type": "string" },
+          "contracts": { "type": "integer" },
+          "active": { "type": "boolean" },
+          "created_at": { "type": "string", "format": "date-time" }
+        },
+        "required": ["network"]
+      },
       "Readiness": {
         "type": "object",
         "description": "A readiness answer. `checks` contains one entry per dependency: database and rpc.",

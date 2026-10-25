@@ -378,7 +378,7 @@ func convertEvent(e *xdr.ScSpecEventV0) (model.Event, error) {
 	}
 
 	out := model.Event{
-		Name:       string(e.Name),
+		Name:       e.Name,
 		Doc:        e.Doc,
 		Lib:        e.Lib,
 		Params:     make([]model.EventParam, 0, len(e.Params)),

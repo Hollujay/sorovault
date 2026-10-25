@@ -179,6 +179,66 @@ func Sign(secret string, body []byte) string {
 	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
 }
 
+// deliverWebhook posts a change payload to a URL, optionally signing it with
+// the given secret. It returns an error if the delivery fails (all retries
+// exhausted).
+func deliverWebhook(ctx context.Context, url string, secret string, change Change, now func() time.Time, log *slog.Logger, client *http.Client, timeout time.Duration) error {
+	if change.ChangedAt.IsZero() {
+		change.ChangedAt = now().UTC()
+	}
+	body, err := json.Marshal(change)
+	if err != nil {
+		return fmt.Errorf("refresher: encoding webhook payload: %w", err)
+	}
+
+	// Retry boundedly: a receiver that hangs must not hold the sweep up.
+	timeoutFn := timeout
+	if timeoutFn <= 0 {
+		timeoutFn = DefaultWebhookTimeout
+	}
+	clientWithTimeout := client
+	if clientWithTimeout == nil {
+		clientWithTimeout = &http.Client{Timeout: timeoutFn}
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		// A request body can be read once, so every attempt gets its own
+		// request; reusing one would post an empty body on a retry.
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+		if err != nil {
+			return fmt.Errorf("refresher: building webhook request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("User-Agent", "sorovault-refresher")
+		if secret != "" {
+			req.Header.Set(SignatureHeader, Sign(secret, body))
+		}
+
+		resp, err := clientWithTimeout.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("refresher: posting webhook (attempt %d): %w", attempt+1, err)
+			continue
+		}
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		_ = resp.Body.Close()
+
+		if resp.StatusCode >= 200 && resp.StatusCode <= 299 {
+			log.DebugContext(ctx, "refresh webhook delivered",
+				"contract_id", change.ContractID, "status", resp.StatusCode)
+			return nil
+		}
+		lastErr = fmt.Errorf("refresher: webhook returned %s", resp.Status)
+		// Short backoff before retry
+		select {
+		case <-time.After(200 * time.Millisecond):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return lastErr
+}
+
 // interfaceURL is where the new interface of a contract can be read.
 func interfaceURL(contractID, network, wasmHash string) string {
 	values := url.Values{}

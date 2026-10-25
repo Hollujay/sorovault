@@ -920,6 +920,125 @@ func (p *Postgres) countContracts(ctx context.Context, f ListFilter) (int, error
 	return total, nil
 }
 
+// Subscribe creates a new webhook subscription for the given network and
+// contract IDs. Returns the subscription ID (which also serves as the
+// secret for HMAC signing and deletion).
+func (p *Postgres) Subscribe(ctx context.Context, network string, contractIDs []string, url string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	id, err := newSubscriptionSecret()
+	if err != nil {
+		return "", err
+	}
+
+	const q = `
+		INSERT INTO subscriptions (id, network, contract_ids, url, active, created_at)
+		VALUES ($1, $2, $3, $4, true, now())
+		ON CONFLICT (id) DO NOTHING
+		RETURNING id`
+	var insertedID string
+	err = p.pool.QueryRow(ctx, q, id, network, strings.Join(contractIDs, ","), url).Scan(&insertedID)
+	if err != nil {
+		return "", fmt.Errorf("store: subscribing: %w", err)
+	}
+	return insertedID, nil
+}
+
+// ListSubscriptions returns all subscriptions, active and inactive.
+func (p *Postgres) ListSubscriptions(ctx context.Context) ([]SubscriptionListItem, error) {
+	const q = `
+		SELECT id, network, contract_ids, active, created_at
+		FROM subscriptions
+		ORDER BY created_at DESC`
+
+	rows, err := p.pool.Query(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("store: listing subscriptions: %w", err)
+	}
+	defer rows.Close()
+
+	items := []SubscriptionListItem{}
+	for rows.Next() {
+		var id, network string
+		var contractIDsStr string
+		var active bool
+		var createdAt time.Time
+		if err := rows.Scan(&id, &network, &contractIDsStr, &active, &createdAt); err != nil {
+			return nil, fmt.Errorf("store: scanning subscription: %w", err)
+		}
+		contractIDs := strings.Split(contractIDsStr, ",")
+		if len(contractIDs) == 1 && contractIDs[0] == "" {
+			contractIDs = nil
+		}
+		items = append(items, SubscriptionListItem{
+			ID:        id,
+			Network:   network,
+			Contracts: len(contractIDs),
+			Active:    active,
+			CreatedAt: createdAt.UTC().Format(time.RFC3339),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: listing subscriptions: %w", err)
+	}
+	return items, nil
+}
+
+// GetSubscription returns a subscription by its secret (ID).
+func (p *Postgres) GetSubscription(ctx context.Context, secret string) (*Subscription, error) {
+	const q = `SELECT id, network, contract_ids, url, active, created_at FROM subscriptions WHERE id = $1`
+	var id, network, contractIDsStr, url string
+	var active bool
+	var createdAt time.Time
+	err := p.pool.QueryRow(ctx, q, secret).Scan(&id, &network, &contractIDsStr, &url, &active, &createdAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("%w: subscription not found", ErrNotFound)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: getting subscription: %w", err)
+	}
+	contractIDs := strings.Split(contractIDsStr, ",")
+	if len(contractIDs) == 1 && contractIDs[0] == "" {
+		contractIDs = nil
+	}
+	sub := Subscription{
+		ID:          id,
+		Network:     network,
+		ContractIDs: contractIDs,
+		URL:         url,
+		Active:      active,
+		CreatedAt:   createdAt,
+	}
+	return &sub, nil
+}
+
+// MarkSubscriptionInactive marks a subscription as inactive.
+func (p *Postgres) MarkSubscriptionInactive(ctx context.Context, secret string) error {
+	const q = `UPDATE subscriptions SET active = false WHERE id = $1`
+	tag, err := p.pool.Exec(ctx, q, secret)
+	if err != nil {
+		return fmt.Errorf("store: marking subscription inactive: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: subscription not found", ErrNotFound)
+	}
+	return nil
+}
+
+// Unsubscribe removes a subscription by its secret (ID).
+func (p *Postgres) Unsubscribe(ctx context.Context, secret string) error {
+	const q = `DELETE FROM subscriptions WHERE id = $1`
+	tag, err := p.pool.Exec(ctx, q, secret)
+	if err != nil {
+		return fmt.Errorf("store: unsubscribing: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: subscription not found", ErrNotFound)
+	}
+	return nil
+}
+
 // GetSpec returns a stored interface. An empty wasmHash selects the version
 // the contract currently runs.
 func (p *Postgres) GetSpec(ctx context.Context, network, contractID, wasmHash string) (*Spec, error) {
