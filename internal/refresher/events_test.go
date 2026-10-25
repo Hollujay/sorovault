@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/soroworks/sorovault/internal/refresher"
+	"github.com/soroworks/sorovault/internal/stellar"
 )
 
 type recordingNotifier struct {
@@ -34,12 +35,19 @@ func (n *recordingNotifier) seen() []refresher.Change {
 // eventRefresher builds a refresher that follows the fixture's fake network.
 func (f *fixture) eventRefresher(t *testing.T, notifier refresher.Notifier) *refresher.Refresher {
 	t.Helper()
+	return f.eventRefresherWith(t, notifier, f.fake)
+}
+
+// eventRefresherWith is eventRefresher reading events through the given
+// follower, so a test can watch what the event loop alone asks of it.
+func (f *fixture) eventRefresherWith(t *testing.T, notifier refresher.Notifier, events stellar.UpdateFollower) *refresher.Refresher {
+	t.Helper()
 	r, err := refresher.New(f.reg, refresher.Options{
 		Interval:       interval,
 		Logger:         f.log,
 		Notifier:       notifier,
 		Now:            f.clock.Now,
-		Events:         f.fake,
+		Events:         events,
 		EventsInterval: 5 * time.Millisecond,
 		Wait:           func(ctx context.Context, _ time.Duration) error { return ctx.Err() },
 	})
@@ -173,11 +181,12 @@ func TestPollEventsResumesFromTheSavedPosition(t *testing.T) {
 	f.fake.Upgrade(id, moduleWith(t, "v2"))
 
 	// A new refresher over the same store picks up where the old one left off.
-	restarted := f.eventRefresher(t, nil)
+	events := &countingFollower{UpdateFollower: f.fake}
+	restarted := f.eventRefresherWith(t, nil, events)
 	sum, err := restarted.PollEvents(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, 1, sum.Changed, "the upgrade that happened during the restart is not lost")
-	assert.Zero(t, f.fake.Calls["LatestLedger"]-1, "a restart does not resync when it has a position")
+	assert.Zero(t, events.latestCalls(), "a restart does not resync when it has a position")
 }
 
 func TestPollEventsFallsBackToASweepWhenTheRangeWasMissed(t *testing.T) {
@@ -268,4 +277,26 @@ func TestRunFollowsEventsAlongsidePolling(t *testing.T) {
 
 	cancel()
 	require.NoError(t, <-done)
+}
+
+// countingFollower counts the LatestLedger calls the event loop makes. The
+// registry asks the same fake for the ledger when it records a version, so
+// the fake's own counter cannot tell a resync from an ordinary refresh.
+type countingFollower struct {
+	stellar.UpdateFollower
+	mu     sync.Mutex
+	latest int
+}
+
+func (c *countingFollower) LatestLedger(ctx context.Context) (uint32, error) {
+	c.mu.Lock()
+	c.latest++
+	c.mu.Unlock()
+	return c.UpdateFollower.LatestLedger(ctx)
+}
+
+func (c *countingFollower) latestCalls() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.latest
 }

@@ -22,15 +22,6 @@ var _ UpdateFollower = (*RPCFetcher)(nil)
 // contract is the one that was upgraded.
 const executableUpdateTopic = "executable_update"
 
-// LatestLedger returns the newest ledger the RPC has closed.
-func (f *RPCFetcher) LatestLedger(ctx context.Context) (uint32, error) {
-	resp, err := f.client.GetLatestLedger(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("stellar: getLatestLedger: %w", err)
-	}
-	return resp.Sequence, nil
-}
-
 // ExecutableUpdates reads the network's executable_update system events.
 //
 // Events are filtered by type on the server and by topic here: the topic
