@@ -1,9 +1,9 @@
 module github.com/soroworks/sorovault
 
-go 1.25.11
+go 1.26.0
 
 require (
-	github.com/go-chi/chi/v5 v5.3.2
+	github.com/go-chi/chi/v5 v5.5.0
 	github.com/go-chi/cors v1.2.2
 	github.com/golang-migrate/migrate/v4 v4.20.1
 	github.com/jackc/pgx/v5 v5.11.0
@@ -12,8 +12,8 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/stellar/go-stellar-sdk v0.7.3
 	github.com/stretchr/testify v1.12.1
-	github.com/yuin/goldmark v1.7.17
-	golang.org/x/sync v0.22.0
+	github.com/yuin/goldmark v1.8.6
+	golang.org/x/sync v0.24.0
 	golang.org/x/time v0.15.0
 )
 
