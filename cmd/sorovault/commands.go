@@ -1120,9 +1120,11 @@ is applied, and nothing is changed on the network.`,
 	return cmd
 }
 
-// doctorDepsFromEnv builds the doctor's dependencies from the environment.
+// doctorDepsFromEnv builds the doctor's dependencies from the configuration
+// source (the --config file where named, then the environment, as with
+// every other command).
 func doctorDepsFromEnv() (doctorDeps, error) {
-	cfg, err := config.Load()
+	cfg, err := config.LoadWith(configPath)
 	if err != nil {
 		return doctorDeps{}, err
 	}

@@ -24,8 +24,10 @@ type app struct {
 }
 
 // newApp loads configuration and connects the registry to Postgres and RPC.
+// The configuration source is whatever --config named (or CONFIG_PATH),
+// layered under the environment.
 func newApp(ctx context.Context) (*app, error) {
-	cfg, err := config.Load()
+	cfg, err := config.LoadWith(configPath)
 	if err != nil {
 		return nil, err
 	}
@@ -98,7 +100,7 @@ func (a *app) fetchContext(ctx context.Context) (context.Context, context.Cancel
 // registry data between stores use it so they cannot accidentally depend on
 // RPC: export and import must work during an outage.
 func withStore(ctx context.Context, fn func(context.Context, store.Store) error) error {
-	cfg, err := config.Load()
+	cfg, err := config.LoadWith(configPath)
 	if err != nil {
 		return err
 	}
@@ -115,10 +117,12 @@ func withStore(ctx context.Context, fn func(context.Context, store.Store) error)
 	return fn(ctx, db)
 }
 
-// requireDatabaseURL produces the same guidance as config.Load for commands
-// that need only the database and skip the rest of the wiring.
+// requireDatabaseURL produces the same guidance as it always has for
+// commands that need only the database and skip the rest of the wiring —
+// the wording callers pin on — while honoring the config file the way
+// every command now does.
 func requireDatabaseURL() (string, error) {
-	url, err := config.DatabaseURLFromEnv()
+	url, err := config.DatabaseURL(configPath)
 	if err != nil {
 		return "", err
 	}

@@ -206,6 +206,34 @@ $ go run ./cmd/sorovault serve
 
 All configuration is environment variables. Only `DATABASE_URL` (or the path in `DATABASE_URL_FILE`, read from the filesystem) is required.
 
+### A YAML file as the base layer
+
+As the settings list grows, a reviewed file is easier to manage than a wall
+of exports. Pass `--config sorovault.yaml` (the `CONFIG_PATH` env var works
+too) and the file's values sit under the environment: the environment
+overrides the file setting by setting — an operator who exported a
+variable did so deliberately, usually in a container — and defaults still
+apply below both. The file's keys are these same env-var names,
+case-insensitively, so `http_addr:` and `HTTP_ADDR:` are the same key, and
+the types YAML gives the document (`read_only: true`, `rpc_timeout: 30s`)
+read as the settings they look like. A key that is not one of the names
+in the table above is an error naming the key, never a setting silently
+ignored, so a spelling slip cannot "work" by doing nothing.
+
+```yaml
+http_addr: ":8080"
+rpc_timeout: 30s
+refresh_interval: 6h
+read_only: true
+cors_origins: "https://dashboard.example.com"
+```
+
+Run `sorovault config show` to print the effective configuration — file,
+environment and defaults merged — with the secrets redacted: the
+connection string keeps its host and loses its password, tokens report
+only how many are configured, and the webhook secret is not even shaped
+back out of what it became. `--json` prints the same rows for scripts.
+
 | Variable | Default | Purpose |
 |---|---|---|
 | `DATABASE_URL` | — | Postgres connection string. **Required** (or set `DATABASE_URL_FILE` to read it from a file). |
@@ -227,6 +255,7 @@ All configuration is environment variables. Only `DATABASE_URL` (or the path in 
 | `CORS_ORIGINS` | — | comma-separated exact browser origins, or `*` for read-only routes only |
 | `READ_ONLY` | `false` | refuse every write endpoint with 405; reads and automatic refreshes stay on (`--read-only` overrides) |
 | `API_TOKENS` | — | comma-separated bearer tokens the write endpoints accept; unset keeps writes public |
+| `CONFIG_PATH` | — | YAML config file whose values sit under the environment (`--config` names it explicitly) |
 
 `NETWORK_PASSPHRASE` is a guard, not a source of truth. SoroVault reads the real
 passphrase from the RPC endpoint and refuses to proceed if the two disagree, so
@@ -611,6 +640,7 @@ sorovault serve                     # JSON API + browse UI
 sorovault migrate                   # apply schema migrations
 sorovault migrate status            # --json
 sorovault doctor                    # check a deployment's health
+sorovault config show               # print the effective configuration, secrets redacted (--json)
 ```
 
 `add` and `refresh` accept several contract IDs and report per-contract
