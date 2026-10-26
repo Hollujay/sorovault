@@ -195,7 +195,7 @@ func completeNetworks() []string {
 
 	// The configured passphrase names this instance's own network, which for a
 	// private chain is not one of the three above.
-	if cfg, err := config.Load(); err == nil {
+	if cfg, err := config.LoadWith(configPath); err == nil {
 		add(stellar.NetworkName(cfg.NetworkPassphrase))
 	} else {
 		debugf("network completion cannot read configuration: %v", err)

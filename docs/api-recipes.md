@@ -508,6 +508,39 @@ $ curl -sS -X POST "$BASE/api/wasm/$OLD_HASH"
 `POST` returns **201** for a newly catalogued hash and **200** when it was
 already stored.
 
+## 15. Deprecate a contract
+
+A team migrating off a contract does not remove it from the registry —
+deployments keep pointing at it. Mark it deprecated instead, with an optional
+successor and note (`{}` alone is a valid body: retire without a destination):
+
+```console
+$ curl -sS -X PUT "$BASE/api/contracts/$CONTRACT/deprecation?network=testnet" \
+    -d '{"successor":"CDZZZPYQALFRBQAZD5KCW2SZK4ZF455PJVD7H53AGHXTWAJO4BYVPP2V","note":"Move voting to zkvote-v2 before December."}'
+```
+
+The successor must be registered on the same network, and must be a contract
+other than the one being deprecated — otherwise the request is refused with
+**400** and the successor the caller named. On success the response is the
+updated contract, which HTTP for the rest of the API then carries:
+
+```json
+{
+  "contract_id": "CDZZXVGUCLBUTE3WDD6TF2NXPTBPOYTVPPBBIZMSPVIQLUG226XJ4PAN",
+  "first_seen": "2026-08-07T09:14:11Z",
+  "last_refreshed": "2026-10-26T09:31:02Z",
+  "deprecated_since": "2026-10-26T09:31:02Z",
+  "successor": "CDZZZPYQALFRBQAZD5KCW2SZK4ZF455PJVD7H53AGHXTWAJO4BYVPP2V",
+  "deprecation_note": "Move voting to zkvote-v2 before December."
+}
+```
+
+The browse page shows the successor as a link; `GET
+/api/contracts/$CONTRACT/client.ts` opens its generated file with a
+`@deprecated` note. `DELETE
+/api/contracts/$CONTRACT/deprecation?network=testnet` lifts the mark and
+answers with the restored contract.
+
 ## Errors, paging and limits
 
 Errors returned by these handlers are JSON. A contract that is not in the

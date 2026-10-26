@@ -25,10 +25,26 @@ type Source struct {
 	Network    string
 	WasmHash   string
 
+	// Deprecation, when set, marks the generated file deprecated: users
+	// importing a client for a retired contract should be told in the
+	// tool that generated the file, not only in the registry.
+	Deprecation *Deprecation
+
 	// WithZod appends runtime Zod schemas for the declared types and
 	// function arguments, so frontends can validate values before they
 	// reach the network. The file then also imports the zod package.
 	WithZod bool
+}
+
+// Deprecation is the mark behind Source.Deprecation.
+type Deprecation struct {
+	// Since is the RFC-3339 moment the contract was marked deprecated.
+	Since string
+	// Successor is the contract ID that replaces it; either party may be
+	// empty when nothing is recorded.
+	Successor string
+	// Note says how to move over.
+	Note string
 }
 
 // sdkImport is the module the generated code builds on. Its contract.Client
@@ -93,6 +109,22 @@ func TypeScript(iface *model.Interface, src Source) (string, error) {
 	if iface.Meta != nil {
 		if v := iface.Meta["rssdkver"]; v != "" {
 			fmt.Fprintf(w, "// Built with soroban-sdk %s\n", oneLine(v))
+		}
+	}
+	if d := src.Deprecation; d != nil {
+		// A deprecation is tool-carrying information, so it goes in the
+		// header where imports start reading, framed the way TypeScript
+		// tooling reads it.
+		fmt.Fprintf(w, "//\n// @deprecated since %s\n", d.Since)
+		var line []string
+		if d.Note != "" {
+			line = append(line, oneLine(d.Note))
+		}
+		if d.Successor != "" {
+			line = append(line, "Use contract "+d.Successor+" instead.")
+		}
+		if len(line) > 0 {
+			fmt.Fprintf(w, "// %s\n", strings.Join(line, " "))
 		}
 	}
 	if src.WithZod {

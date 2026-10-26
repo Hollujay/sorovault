@@ -60,6 +60,35 @@ func newHarnessWithStore(t *testing.T, fake *stellartest.Fake, db store.Store) *
 	return newHarnessWithOptions(t, fake, db, registry.Options{})
 }
 
+// newReadOnlyHarness is newHarness with serve's read-only mode on, set
+// before the routes mount, the way READ_ONLY configures it.
+func newReadOnlyHarness(t *testing.T) *harness {
+	t.Helper()
+
+	return newHarnessWithConfigure(t, func(s *api.Server) { s.SetReadOnly(true) })
+}
+
+// newHarnessWithConfigure builds the default harness with a tweak applied
+// to the API server before its routes mount.
+func newHarnessWithConfigure(t *testing.T, configure func(*api.Server)) *harness {
+	t.Helper()
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	fake := stellartest.New()
+	opts := registry.Options{Logger: log}
+	reg := registry.New(fake, spec.XDRDecoder{}, store.NewMemory(), opts)
+
+	server := api.NewServer(reg, log)
+	configure(server)
+	r := chi.NewRouter()
+	r.Mount("/api", server.Routes())
+
+	srv := httptest.NewServer(r)
+	t.Cleanup(srv.Close)
+
+	return &harness{server: srv, fake: fake, store: reg.Store(), api: server}
+}
+
 // newHarnessWithOptions builds a harness over the given network, store and
 // registry options.
 func newHarnessWithOptions(t *testing.T, fake *stellartest.Fake, db store.Store, opts registry.Options) *harness {
@@ -121,6 +150,32 @@ func (h *harness) do(t *testing.T, method, path, body string) (*response, []byte
 	if body != "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
+
+	resp, err := h.server.Client().Do(req)
+	require.NoError(t, err)
+
+	raw, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	return &response{StatusCode: resp.StatusCode, Header: resp.Header}, raw
+}
+
+// doWithHeader is do with one extra request header, for tests that need
+// credentials beyond JSON bodies.
+func (h *harness) doWithHeader(t *testing.T, method, path, body, key, value string) (*response, []byte) {
+	t.Helper()
+
+	var reader io.Reader
+	if body != "" {
+		reader = strings.NewReader(body)
+	}
+
+	req, err := http.NewRequestWithContext(context.Background(), method, h.server.URL+path, reader)
+	require.NoError(t, err)
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set(key, value)
 
 	resp, err := h.server.Client().Do(req)
 	require.NoError(t, err)
@@ -328,6 +383,209 @@ func TestUpdateContractSource(t *testing.T) {
 
 	resp, raw = h.do(t, http.MethodPut, "/api/contracts/"+idB+"/source", body)
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode, string(raw))
+}
+
+func TestContractDeprecation(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.fake.Deploy(idA, moduleWith(t, "balance"))
+	h.fake.Deploy(idB, moduleWith(t, "balance"))
+	resp, _ := h.do(t, http.MethodPost, "/api/contracts", `{"contract_id":"`+idA+`"}`)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	resp, _ = h.do(t, http.MethodPost, "/api/contracts", `{"contract_id":"`+idB+`"}`)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+
+	// Mark A deprecated with B as the successor.
+	body := `{"successor":"` + idB + `","note":"Move voting to the replacement."}`
+	resp, raw := h.do(t, http.MethodPut, "/api/contracts/"+idA+"/deprecation", body)
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+	got := h.decode(t, raw)
+	assert.NotEmpty(t, got["deprecated_since"])
+	assert.Equal(t, idB, got["successor"])
+	assert.Equal(t, "Move voting to the replacement.", got["deprecation_note"])
+
+	// The listing carries the mark too.
+	resp, raw = h.do(t, http.MethodGet, "/api/contracts", "")
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+	assert.Contains(t, string(raw), "deprecated_since")
+
+	// The generated client warns its importer.
+	resp, raw = h.do(t, http.MethodGet, "/api/contracts/"+idA+"/client.ts", "")
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+	assert.Contains(t, string(raw), "// @deprecated since")
+	assert.Contains(t, string(raw), "Use contract "+idB+" instead.")
+
+	// Clearing restores the contract to active use.
+	resp, raw = h.do(t, http.MethodDelete, "/api/contracts/"+idA+"/deprecation", "")
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+	got = h.decode(t, raw)
+	assert.Empty(t, got["deprecated_since"])
+	assert.Empty(t, got["successor"])
+	assert.Empty(t, got["deprecation_note"])
+
+	// The generated client no longer warns.
+	resp, raw = h.do(t, http.MethodGet, "/api/contracts/"+idA+"/client.ts", "")
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+	assert.NotContains(t, string(raw), "@deprecated")
+}
+
+// TestReadOnlyMode pins what READ_ONLY changes: reads keep answering, the
+// stateless POST /api/decode stays available, and every route that writes
+// answers 405 with an explanation instead of a 404 that would read as an
+// unknown resource.
+func TestReadOnlyMode(t *testing.T) {
+	t.Parallel()
+
+	h := newReadOnlyHarness(t)
+
+	// Reads are untouched.
+	resp, raw := h.do(t, http.MethodGet, "/api/contracts", "")
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+
+	resp, raw = h.do(t, http.MethodGet, "/api/stats", "")
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+	assert.True(t, h.decode(t, raw)["read_only"].(bool))
+
+	// The decode form is stateless: it stores nothing, so read-only keeps
+	// it.
+	module := moduleWith(t, "proposed")
+	resp, raw = h.do(t, http.MethodPost, "/api/decode", string(module))
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+
+	// Every route that writes is refused where it mounts.
+	hash := strings.Repeat("ab", 32) // syntactically valid, never dereferenced
+	writes := []struct{ method, path string }{
+		{"POST", "/api/contracts"},
+		{"POST", "/api/contracts:batch"},
+		{"POST", "/api/wasm/" + hash},
+		{"PUT", "/api/contracts/" + idA + "/source"},
+		{"PUT", "/api/contracts/" + idA + "/deprecation"},
+		{"DELETE", "/api/contracts/" + idA + "/deprecation"},
+		{"POST", "/api/contracts/" + idA + "/refresh"},
+		{"POST", "/api/subscriptions"},
+		{"DELETE", "/api/subscriptions/somesecret"},
+	}
+	for _, tt := range writes {
+		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
+			t.Parallel()
+
+			resp, raw := h.do(t, tt.method, tt.path, "{}")
+			assert.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode, string(raw))
+			assert.Contains(t, h.decode(t, raw)["error"], "read-only")
+		})
+	}
+}
+
+// TestWriteAuth pins what API_TOKENS changes: reads stay public, writes
+// need a bearer credential, a wrong secret only ever earns "unauthorized"
+// and never echoes the presented value, and every token in the configured
+// set works — which is what makes rotation a configuration change.
+func TestWriteAuth(t *testing.T) {
+	t.Parallel()
+
+	tokens := []string{
+		"0123456789abcdef-dashboards",
+		"0987654321fedcba-ci-runner",
+	}
+	h := newHarnessWithConfigure(t, func(s *api.Server) { s.SetAPITokens(tokens) })
+
+	// Reads are public, including the stateless decode form.
+	resp, raw := h.do(t, http.MethodGet, "/api/contracts", "")
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+	resp, raw = h.do(t, http.MethodPost, "/api/decode", string(moduleWith(t, "proposed")))
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+
+	// No credential: teach the client the header shape.
+	resp, raw = h.do(t, http.MethodPost, "/api/contracts", `{"contract_id":"nope"}`)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode, string(raw))
+	assert.Contains(t, h.decode(t, raw)["error"], "Bearer")
+
+	// A well-formed credential with the wrong secret is an access attempt
+	// (401), while a header without a Bearer prefix is a client mistake
+	// worth teaching (400). Neither carries the presented secret back.
+	wrong := []struct {
+		name, value string
+		wantStatus  int
+	}{
+		{"wrong token", "Bearer not-the-configured-secret-ooo", http.StatusUnauthorized},
+		{"lower-case prefix is not Bearer", "bearer " + tokens[0], http.StatusBadRequest},
+	}
+	for _, tt := range wrong {
+		resp, raw = h.doWithHeader(t, http.MethodPost, "/api/contracts",
+			`{"contract_id":"nope"}`, "Authorization", tt.value)
+		require.Equal(t, tt.wantStatus, resp.StatusCode, tt.name)
+		if tt.wantStatus == http.StatusUnauthorized {
+			assert.Equal(t, `Bearer realm="sorovault"`, resp.Header.Get("WWW-Authenticate"), tt.name)
+		}
+		assert.NotContains(t, string(raw), tt.value,
+			"the response never carries the presented secret back")
+	}
+
+	// Every configured token opens the writes — that is the rotation.
+	h.fake.Deploy(idA, moduleWith(t, "balance"))
+	resp, raw = h.doWithHeader(t, http.MethodPost, "/api/contracts",
+		`{"contract_id":"`+idA+`"}`, "Authorization", "Bearer "+tokens[0])
+	require.Equal(t, http.StatusCreated, resp.StatusCode, string(raw))
+
+	resp, raw = h.doWithHeader(t, http.MethodPut, "/api/contracts/"+idA+"/source",
+		`{"source_url":"https://github.com/example/repo"}`, "Authorization", "Bearer "+tokens[1])
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+}
+
+// TestWriteAuthReadOnlyWins pins the composition: a server both read-only
+// and token-gated answers writes with 405, not 401, since no credential
+// can make a refused route run. Reads stay public either way.
+func TestWriteAuthReadOnlyWins(t *testing.T) {
+	t.Parallel()
+
+	h := newHarnessWithConfigure(t, func(s *api.Server) {
+		s.SetReadOnly(true)
+		s.SetAPITokens([]string{"0123456789abcdef-dashboards"})
+	})
+
+	resp, raw := h.do(t, http.MethodPost, "/api/contracts", "{}")
+	assert.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode, string(raw))
+	assert.Contains(t, h.decode(t, raw)["error"], "read-only")
+}
+
+func TestContractDeprecationRequests(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.fake.Deploy(idA, moduleWith(t, "balance"))
+	resp, _ := h.do(t, http.MethodPost, "/api/contracts", `{"contract_id":"`+idA+`"}`)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+
+	bad := []struct {
+		name string
+		body string
+		path string
+		want int
+	}{
+		{"successor is the contract itself", `{"successor":"` + idA + `"}`, idA, http.StatusBadRequest},
+		{"successor is not registered", `{"successor":"` + idB + `"}`, idA, http.StatusBadRequest},
+		{"unknown contract", `{}`, idB, http.StatusNotFound},
+		{"bad json", `{`, idA, http.StatusBadRequest},
+		{"unknown field", `{"why":"because"}`, idA, http.StatusBadRequest},
+	}
+	for _, tt := range bad {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			resp, raw := h.do(t, http.MethodPut, "/api/contracts/"+tt.path+"/deprecation", tt.body)
+			assert.Equal(t, tt.want, resp.StatusCode, string(raw))
+			assert.NotEmpty(t, h.decode(t, raw)["error"])
+		})
+	}
+
+	// A bare object retires the contract without a destination.
+	resp, raw := h.do(t, http.MethodPut, "/api/contracts/"+idA+"/deprecation", `{}`)
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+	got := h.decode(t, raw)
+	assert.NotEmpty(t, got["deprecated_since"])
+	assert.Empty(t, got["successor"])
+	assert.Empty(t, got["deprecation_note"])
 }
 
 // TestRegisterExistingContractReturns200 distinguishes creating a record

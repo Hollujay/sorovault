@@ -48,7 +48,7 @@
         "summary": "List or search contracts",
         "operationId": "listContracts",
         "parameters": [
-          { "name": "q", "in": "query", "description": "Case-insensitive substring of the contract ID, its name, or a function, type or event name in its current interface.", "schema": { "type": "string" } },
+          { "name": "q", "in": "query", "description": "Case-insensitive substring of the contract ID, its name, or a function, type or event name in its current interface. Failing those, a word search over the doc comments of its functions and user-defined types, where every word of the query must be found; doc matches rank below name matches.", "schema": { "type": "string" } },
           { "name": "function", "in": "query", "description": "Only contracts whose current interface declares a function with exactly this name. Repeatable; every name must match. Case-sensitive.", "schema": { "type": "array", "items": { "type": "string" } }, "style": "form", "explode": true },
           { "name": "type", "in": "query", "description": "Only contracts whose current interface declares a user-defined type with exactly this name. Repeatable; every name must match. Case-sensitive.", "schema": { "type": "array", "items": { "type": "string" } }, "style": "form", "explode": true },
           { "name": "implements", "in": "query", "description": "Only contracts implementing every listed standard interface ID, such as sep41. Repeatable.", "schema": { "type": "array", "items": { "type": "string" } }, "style": "form", "explode": true },
@@ -66,6 +66,7 @@
         "summary": "Register a contract",
         "description": "Fetches the contract's WASM, decodes its interface and stores it. Idempotent: registering a known contract re-verifies it, and records a new interface version if it was upgraded.",
         "operationId": "registerContract",
+        "security": [{ "bearerToken": [] }],
         "requestBody": {
           "required": true,
           "content": { "application/json": { "schema": {
@@ -91,6 +92,7 @@
         "summary": "Register several contracts in one request",
         "description": "Registers up to 20 contracts, one after another, and reports one result per contract. The contracts are processed sequentially, so the batch draws on the registry's concurrency budget once per contract rather than all at once, and one failure does not stop the rest: every contract gets a result of its own, with the status code it would have had on its own request.",
         "operationId": "batchRegisterContracts",
+        "security": [{ "bearerToken": [] }],
         "requestBody": {
           "required": true,
           "content": { "application/json": { "schema": {
@@ -111,6 +113,7 @@
         "summary": "Register a webhook URL for a set of contracts",
         "description": "Registers a webhook URL that will be notified when any of the specified contracts' interfaces change. Returns a secret used to sign deliveries.",
         "operationId": "subscribeContract",
+        "security": [{ "bearerToken": [] }],
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SubscribeRequest" } } } },
         "responses": {
           "200": { "description": "Subscription registered.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SubscribeResponse" } } } },
@@ -132,6 +135,7 @@
         "description": "Removes a webhook subscription by its secret.",
         "parameters": [{ "name": "secret", "in": "path", "required": true, "description": "The secret returned when the subscription was created.", "schema": { "type": "string" } }],
         "operationId": "unsubscribeContract",
+        "security": [{ "bearerToken": [] }],
         "responses": {
           "200": { "description": "Subscription removed.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SubscribeResponse" } } } },
           "400": { "$ref": "#/components/responses/BadRequest" }
@@ -182,6 +186,7 @@
       "put": {
         "summary": "Attach source repository metadata",
         "operationId": "updateContractSource",
+        "security": [{ "bearerToken": [] }],
         "parameters": [{ "$ref": "#/components/parameters/id" }, { "$ref": "#/components/parameters/network" }],
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SourceRequest" } } } },
         "responses": {
@@ -217,6 +222,31 @@
         }
       }
     },
+    "/api/contracts/{id}/deprecation": {
+      "put": {
+        "summary": "Mark a contract deprecated",
+        "description": "Marks the contract deprecated, with an optional successor contract ID and note. The successor, when given, must be registered on the same network and must be a contract other than the one being deprecated. A refresh never lifts the mark; only DELETE does.",
+        "operationId": "setContractDeprecation",
+        "security": [{ "bearerToken": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/id" }, { "$ref": "#/components/parameters/network" }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeprecationRequest" } } } },
+        "responses": {
+          "200": { "description": "The contract is deprecated; the response carries the mark.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Contract" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "delete": {
+        "summary": "Lift a contract's deprecation",
+        "operationId": "clearContractDeprecation",
+        "security": [{ "bearerToken": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/id" }, { "$ref": "#/components/parameters/network" }],
+        "responses": {
+          "200": { "description": "The contract is back in active use; the response no longer carries a deprecation.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Contract" } } } },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
     "/api/wasm/{hash}": {
       "get": {
         "summary": "Get a catalogued uploaded WASM interface",
@@ -231,6 +261,7 @@
         "summary": "Catalog uploaded code by WASM hash",
         "description": "Fetches and decodes uploaded code even when no deployed contract currently references it.",
         "operationId": "catalogWasm",
+        "security": [{ "bearerToken": [] }],
         "parameters": [{ "$ref": "#/components/parameters/hash" }],
         "responses": {
           "201": { "description": "Newly catalogued.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WasmCatalogResult" } } } },
@@ -356,6 +387,7 @@
       "post": {
         "summary": "Re-check a registered contract against the network",
         "operationId": "refreshContract",
+        "security": [{ "bearerToken": [] }],
         "parameters": [{ "$ref": "#/components/parameters/id" }],
         "responses": {
           "200": { "description": "Refreshed. `changed` is true when a new interface version was recorded.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RegisterResult" }, "examples": { "unchanged": { "$ref": "#/components/examples/ExistingRegisterResult" } } } } },
@@ -438,6 +470,13 @@
     "headers": {
       "Attestation": { "description": "Detached Ed25519 signature, base64, over `sorovault-attestation-v1\\n` followed by the canonical JSON (RFC 8785, sorted keys, no whitespace) of `{\"contract_id\", \"interface\", \"network\", \"v\": 1, \"wasm_hash\"}` built from the response body (`contract_id` is omitted for `/api/wasm/{hash}`). Present only when the registry has a signing key.", "schema": { "type": "string" } },
       "KeyId": { "description": "Id of the key that signed, as listed at `GET /api/keys`.", "schema": { "type": "string" } }
+    },
+    "securitySchemes": {
+      "bearerToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "One of the bearer tokens the operator configured. Required on write operations only: reads are public."
+      }
     },
     "parameters": {
       "id": { "name": "id", "in": "path", "required": true, "schema": { "$ref": "#/components/schemas/ContractID" } },
@@ -707,9 +746,10 @@
           "contracts": { "type": "integer", "description": "Registered contracts across every network." },
           "versions": { "type": "integer", "description": "Stored interface versions across every network." },
           "latest_contract": { "$ref": "#/components/schemas/Contract", "description": "The most recently registered contract. Absent when the registry is empty." },
-          "last_refresh": { "$ref": "#/components/schemas/RefreshSummary", "description": "The most recent automatic refresh sweep. Absent when refresh is disabled or no sweep has finished yet." }
+          "last_refresh": { "$ref": "#/components/schemas/RefreshSummary", "description": "The most recent automatic refresh sweep. Absent when refresh is disabled or no sweep has finished yet." },
+          "read_only": { "type": "boolean", "description": "True when this server refuses writes: registrations, refreshes and source or deprecation edits answer 405, while reads and the automatic refresher continue." }
         },
-        "required": ["networks", "contracts", "versions"]
+        "required": ["networks", "contracts", "versions", "read_only"]
       },
       "RefreshSummary": {
         "type": "object",
@@ -765,7 +805,10 @@
           "verified_at": { "type": "string", "format": "date-time" },
           "verified_wasm_hash": { "$ref": "#/components/schemas/WasmHash" },
           "matches": { "type": "array", "items": { "type": "string" }, "description": "Interface symbols a search query matched. Only present on search results." },
-          "implements": { "type": "array", "items": { "type": "string" }, "description": "Standard interface IDs detected from the current contract interface." }
+          "implements": { "type": "array", "items": { "type": "string" }, "description": "Standard interface IDs detected from the current contract interface." },
+          "deprecated_since": { "type": "string", "format": "date-time", "description": "When the contract was marked deprecated. Absent while the contract is in active use." },
+          "successor": { "type": "string", "description": "The contract ID that replaces a deprecated one. Absent when no successor is recorded." },
+          "deprecation_note": { "type": "string", "description": "How to move over, from the tooling that marked the contract deprecated." }
         },
         "required": ["contract_id", "network", "current_wasm_hash", "first_seen", "last_refreshed"]
       },
@@ -867,6 +910,15 @@
           }
         },
         "required": ["keys"]
+      },
+      "DeprecationRequest": {
+        "type": "object",
+        "description": "Both fields are optional: a contract can be retired without a recorded destination.",
+        "properties": {
+          "successor": { "type": "string", "description": "The contract ID that replaces the deprecated one. Must be registered on the same network, and must be a contract other than the one being deprecated." },
+          "note": { "type": "string", "description": "How to move over, for the users the banner reaches." }
+        },
+        "additionalProperties": false
       },
       "WasmSpec": {
         "type": "object",

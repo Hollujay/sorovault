@@ -26,6 +26,48 @@ var src = codegen.Source{
 	WasmHash:   "abc123",
 }
 
+// TestDeprecationHeader proves a deprecation mark reaches the generated
+// file as a tool-readable note in the header, and that the variants — a
+// note without a successor, a successor without a note, neither — stay
+// readable instead of printing empty punctuation.
+func TestDeprecationHeader(t *testing.T) {
+	t.Parallel()
+
+	newSource := func(deprecation *codegen.Deprecation) codegen.Source {
+		s := src
+		s.Deprecation = deprecation
+		return s
+	}
+
+	generate := func(t *testing.T, s codegen.Source) string {
+		t.Helper()
+		iface := &model.Interface{
+			ABIVersion: model.ABIVersion,
+			Types:      model.Types{ErrorEnums: []model.ErrorEnum{}},
+			Events:     []model.Event{},
+		}
+		got, err := codegen.TypeScript(iface, s)
+		require.NoError(t, err)
+		return got
+	}
+
+	got := generate(t, newSource(&codegen.Deprecation{
+		Since:     "2026-10-26T09:31:02Z",
+		Successor: "CDZZZPYQALFRBQAZD5KCW2SZK4ZF455PJVD7H53AGHXTWAJO4BYVPP2V",
+		Note:      "Move voting to the replacement.",
+	}))
+	assert.Contains(t, got, "//\n// @deprecated since 2026-10-26T09:31:02Z\n")
+	assert.Contains(t, got, "// Move voting to the replacement. Use contract CDZZZPYQALFRBQAZD5KCW2SZK4ZF455PJVD7H53AGHXTWAJO4BYVPP2V instead.\n")
+
+	got = generate(t, newSource(&codegen.Deprecation{Since: "2026-10-26T09:31:02Z"}))
+	assert.Contains(t, got, "// @deprecated since 2026-10-26T09:31:02Z\n")
+	assert.NotContains(t, got, "Use contract")
+
+	got = generate(t, newSource(nil))
+	assert.NotContains(t, got, "@deprecated",
+		"an active contract generates no deprecation remark")
+}
+
 // TestGoldenZKVote generates a client for the real testnet contract whose
 // decoded ABI the spec package pins, and compares it with a checked-in file.
 // CI type-checks that file against @stellar/stellar-sdk, so the golden is

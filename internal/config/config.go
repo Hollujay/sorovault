@@ -1,4 +1,5 @@
-// Package config loads SoroVault's settings from the environment.
+// Package config loads SoroVault's settings from the environment, with an
+// optional YAML file as the base layer under it.
 package config
 
 import (
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/soroworks/sorovault/internal/attest"
+	"go.yaml.in/yaml/v3"
 )
 
 // Defaults applied when the corresponding variable is unset.
@@ -30,31 +32,14 @@ const (
 	// RPC for new upgrade events when REFRESH_EVENTS is on. The network
 	// closes a ledger about every five seconds.
 	DefaultRefreshEventsInterval = 10 * time.Second
+	MinDatabaseMaxConns          = 1
+	MaxDatabaseConns             = 10000
 )
 
 // Log format names accepted by LOG_FORMAT.
 const (
 	LogFormatText = "text"
 	LogFormatJSON = "json"
-)
-
-// Bounds on the connection pool sizes accepted from the environment.
-//
-// The sizes themselves default to zero, which means "not configured": pgx
-// picks its own default, the greater of 4 or the number of CPUs for the
-// maximum and none for the minimum. That default is deliberately not spelled
-// out here, because pgx derives it from the machine the process runs on and
-// a copy frozen into this file would be right for one host and wrong for
-// another.
-const (
-	// MinDatabaseMaxConns is the smallest maximum accepted: a pool of
-	// zero connections could not serve a request.
-	MinDatabaseMaxConns = 1
-	// MaxDatabaseConns is the largest size accepted, for the maximum or
-	// the minimum. A registry serving a busy API does not need a pool of
-	// tens of thousands of connections, so a value this large is nearly
-	// always a typo.
-	MaxDatabaseConns = 10000
 )
 
 // Config is the resolved runtime configuration.
@@ -128,6 +113,58 @@ type Config struct {
 	// X-Forwarded-For as the client. It must only be set behind a proxy the
 	// operator controls, because a client can otherwise forge its address.
 	TrustXForwardedFor bool
+	// ReadOnly makes serve refuse every write endpoint with 405, leaving
+	// reads and the automatic refresher untouched, so an operator can
+	// publish a registry for browsing without accepting registrations.
+	ReadOnly bool
+	// APITokens are the bearer credentials the write endpoints accept.
+	// Put in rotation by configuring several. Empty keeps every write
+	// public, as the API has always behaved; when any are set, a write
+	// must present one as `Authorization: Bearer <token>`.
+	//
+	// Secrets live here in memory only: nothing logs, serialises or
+	// echoes the configured values.
+	APITokens []string
+}
+
+// MinAPITokenLength is the shortest API token the write auth accepts.
+//
+// The limit is a floor, not advice: a token short enough to guess is not
+// meaningfully different from no token at all. Generate with something
+// like `openssl rand -hex 32`.
+const MinAPITokenLength = 16
+
+// ParseAPITokens decodes an API_TOKENS value: comma-separated bearer
+// tokens, whitespace around an entry ignored. Whitespace inside an entry
+// is kept — it is a secret's bytes, and trimming secrets is how mismatches
+// happen — so an entry with any embedded space is refused as a mistake.
+// An empty or absent value yields no tokens, which keeps every write
+// public.
+func ParseAPITokens(raw string) ([]string, error) {
+	tokens := []string{}
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		switch {
+		case entry == "":
+			continue
+		case strings.ContainsAny(entry, " \t\n"):
+			return nil, fmt.Errorf("config: API_TOKENS contains whitespace; each token must be one string")
+		}
+		tokens = append(tokens, entry)
+	}
+
+	names := map[string]bool{}
+	for _, token := range tokens {
+		if len(token) < MinAPITokenLength {
+			return nil, fmt.Errorf("config: API_TOKENS has a %d character token; use at least %d (e.g. `openssl rand -hex 32`)",
+				len(token), MinAPITokenLength)
+		}
+		if names[token] {
+			return nil, fmt.Errorf("config: API_TOKENS repeats a token; each token must be unique")
+		}
+		names[token] = true
+	}
+	return tokens, nil
 }
 
 // MinRefreshEventsInterval is the shortest REFRESH_EVENTS_INTERVAL accepted,
@@ -139,6 +176,117 @@ const MinRefreshEventsInterval = 2 * time.Second
 // sweep over a large registry could still be running when the next is due,
 // and a public RPC endpoint would see it as abuse.
 const MinRefreshInterval = time.Minute
+
+// source resolves a setting by name: the environment first, then the
+// values a config file supplied. The environment keeps precedence
+// everywhere, because an operator who exported a variable — usually in a
+// container or a systemd unit — did so deliberately, while a file is
+// edited and reviewed. Keys in the file are the env-var names,
+// case-insensitively.
+type source struct {
+	file map[string]string
+}
+
+// Getenv is a value for name, or "" when neither layer sets it. An empty
+// value in the file cannot shadow the environment away: absence and an
+// empty variable have always meant the same thing, and they keep meaning
+// it.
+func (s *source) Getenv(name string) string {
+	if v := os.Getenv(name); v != "" {
+		return v
+	}
+	return s.file[strings.ToLower(name)]
+}
+
+// knownConfigKeys is every setting name Load reads from any source,
+// lowercased. A config file must name exactly these: a key outside the
+// set is rejected naming it, because a spelling slip that "works" by
+// being ignored is how a file stops being reviewed at all.
+var knownConfigKeys = map[string]bool{
+	"database_url":                 true,
+	"database_url_file":            true,
+	"rpc_url":                      true,
+	"network_passphrase":           true,
+	"max_concurrent_registrations": true,
+	"database_max_conns":           true,
+	"database_min_conns":           true,
+	"http_addr":                    true,
+	"public_url":                   true,
+	"log_level":                    true,
+	"log_format":                   true,
+	"rpc_timeout":                  true,
+	"refresh_interval":             true,
+	"refresh_webhook_url":          true,
+	"refresh_webhook_secret":       true,
+	"refresh_events":               true,
+	"refresh_events_interval":      true,
+	"signing_key":                  true,
+	"signing_key_file":             true,
+	"signing_retired_keys":         true,
+	"cors_origins":                 true,
+	"rate_limit_per_minute":        true,
+	"rate_limit_burst":             true,
+	"trust_x_forwarded_for":        true,
+	"read_only":                    true,
+	"api_tokens":                   true,
+}
+
+// loadConfigFile parses a YAML config file into the flat map of
+// env-name → value the overlaying source consults.
+//
+// The file must not become a second configuration language: keys are the
+// env-var names, every value is a single scalar the existing env parsing
+// will see as a string, and anything else — a nested map, a list, an
+// unknown key — is an error naming the key, not a value silently ignored.
+func loadConfigFile(path string) (map[string]string, error) {
+	b, err := os.ReadFile(path) //nolint:gosec // path is an operator-provided setting
+	if err != nil {
+		return nil, fmt.Errorf("config: %s: %w", path, err)
+	}
+
+	var doc map[string]any
+	if err := yaml.Unmarshal(b, &doc); err != nil {
+		return nil, fmt.Errorf("config: %s: %w", path, err)
+	}
+
+	values := make(map[string]string, len(doc))
+	for key, val := range doc {
+		lower := strings.ToLower(strings.TrimSpace(key))
+		if !knownConfigKeys[lower] {
+			return nil, fmt.Errorf("config: %s: unknown key %q", path, key)
+		}
+		value, err := scalarValue(path, key, lower, val)
+		if err != nil {
+			return nil, err
+		}
+		if value != "" {
+			values[lower] = value
+		}
+	}
+	return values, nil
+}
+
+// scalarValue renders one YAML value as the string the env layer parses.
+// YAML types the document for the user — booleans, integers, quoted
+// strings — so it is translated here once, and the parsing code stays
+// single-sourced:
+func scalarValue(path, key, lower string, val any) (string, error) {
+	switch typed := val.(type) {
+	case nil:
+		return "", nil
+	case string:
+		return typed, nil
+	case bool, int, int64, uint64, float32, float64:
+		return strings.TrimSpace(fmt.Sprintf("%v", typed)), nil
+	case map[string]any:
+		return "", fmt.Errorf("config: %s: %q holds a nested map; each setting is a single value", path, key)
+	case []any:
+		return "", fmt.Errorf("config: %s: %q holds a list; give a single value, or comma-separate it like %s",
+			path, key, strings.ToUpper(lower))
+	default:
+		return "", fmt.Errorf("config: %s: %q is a %T, which is not a written setting", path, key, val)
+	}
+}
 
 // Bounds on MAX_CONCURRENT_REGISTRATIONS, the number of registrations and
 // refreshes allowed to run at once.
@@ -155,35 +303,54 @@ const (
 // Load reads configuration from the process environment.
 //
 // The database connection string is the only setting with no usable default
-// (see DatabaseURLFromEnv), so it is the only one whose absence is an error.
+// (see config.DatabaseURL), so it is the only one whose absence is an error.
 func Load() (*Config, error) {
-	databaseURL, err := DatabaseURLFromEnv()
+	return LoadWith("")
+}
+
+// LoadWith loads configuration the way Load does, layered: when configPath
+// names a YAML file, its values are the base layer and the environment
+// overrides them key by key. An empty path is Load exactly.
+//
+// The file's keys are the env-var names, case-insensitively, and unknown
+// keys are refused naming them (see loadConfigFile).
+func LoadWith(configPath string) (*Config, error) {
+	src := &source{}
+	if configPath != "" {
+		file, err := loadConfigFile(configPath)
+		if err != nil {
+			return nil, err
+		}
+		src.file = file
+	}
+
+	databaseURL, err := databaseURL(src)
 	if err != nil {
 		return nil, err
 	}
 
 	cfg := &Config{
-		RPCURL:            envOr("RPC_URL", DefaultRPCURL),
-		NetworkPassphrase: envOr("NETWORK_PASSPHRASE", DefaultNetworkPassphrase),
+		RPCURL:            envOr(src, "RPC_URL", DefaultRPCURL),
+		NetworkPassphrase: envOr(src, "NETWORK_PASSPHRASE", DefaultNetworkPassphrase),
 		DatabaseURL:       databaseURL,
-		HTTPAddr:          envOr("HTTP_ADDR", DefaultHTTPAddr),
-		PublicURL:         strings.TrimRight(strings.TrimSpace(os.Getenv("PUBLIC_URL")), "/"),
+		HTTPAddr:          envOr(src, "HTTP_ADDR", DefaultHTTPAddr),
+		PublicURL:         strings.TrimRight(strings.TrimSpace(src.Getenv("PUBLIC_URL")), "/"),
 		RPCTimeout:        DefaultRPCTimeout,
 	}
 
-	level, err := parseLevel(envOr("LOG_LEVEL", DefaultLogLevel))
+	level, err := parseLevel(envOr(src, "LOG_LEVEL", DefaultLogLevel))
 	if err != nil {
 		return nil, err
 	}
 	cfg.LogLevel = level
 
-	format, err := parseLogFormat(envOr("LOG_FORMAT", DefaultLogFormat))
+	format, err := parseLogFormat(envOr(src, "LOG_FORMAT", DefaultLogFormat))
 	if err != nil {
 		return nil, err
 	}
 	cfg.LogFormat = format
 
-	if raw := os.Getenv("RPC_TIMEOUT"); raw != "" {
+	if raw := src.Getenv("RPC_TIMEOUT"); raw != "" {
 		d, err := time.ParseDuration(raw)
 		if err != nil {
 			return nil, fmt.Errorf("config: RPC_TIMEOUT %q: %w", raw, err)
@@ -194,7 +361,7 @@ func Load() (*Config, error) {
 		cfg.RPCTimeout = d
 	}
 
-	if raw := os.Getenv("REFRESH_INTERVAL"); raw != "" {
+	if raw := src.Getenv("REFRESH_INTERVAL"); raw != "" {
 		d, err := time.ParseDuration(raw)
 		if err != nil {
 			return nil, fmt.Errorf("config: REFRESH_INTERVAL %q: %w", raw, err)
@@ -206,53 +373,55 @@ func Load() (*Config, error) {
 		cfg.RefreshInterval = d
 	}
 
-	limit, err := envInt("MAX_CONCURRENT_REGISTRATIONS",
+	limit, err := envInt(src, "MAX_CONCURRENT_REGISTRATIONS",
 		MinConcurrentRegistrationLimit, MaxConcurrentRegistrationLimit)
 	if err != nil {
 		return nil, err
 	}
 	cfg.MaxConcurrentRegistrations = limit
 
-	webhookURL := strings.TrimSpace(os.Getenv("REFRESH_WEBHOOK_URL"))
+	webhookURL := strings.TrimSpace(src.Getenv("REFRESH_WEBHOOK_URL"))
 	if webhookURL != "" {
 		if err := checkWebhookURL(webhookURL); err != nil {
 			return nil, err
 		}
 	}
 	cfg.RefreshWebhookURL = webhookURL
-	cfg.RefreshWebhookSecret = os.Getenv("REFRESH_WEBHOOK_SECRET")
+	cfg.RefreshWebhookSecret = src.Getenv("REFRESH_WEBHOOK_SECRET")
 
-	cfg.CORSOrigins, err = parseCORSOrigins(os.Getenv("CORS_ORIGINS"))
+	cfg.CORSOrigins, err = parseCORSOrigins(src.Getenv("CORS_ORIGINS"))
 	if err != nil {
 		return nil, err
 	}
 
-	cfg.RateLimitPerMinute, err = envIntDefault("RATE_LIMIT_PER_MINUTE",
+	cfg.RateLimitPerMinute, err = envIntDefault(src, "RATE_LIMIT_PER_MINUTE",
 		DefaultRateLimitPerMinute, 1, 100000)
 	if err != nil {
 		return nil, err
 	}
-	cfg.RateLimitBurst, err = envIntDefault("RATE_LIMIT_BURST",
+	cfg.RateLimitBurst, err = envIntDefault(src, "RATE_LIMIT_BURST",
 		DefaultRateLimitBurst, 1, 100000)
 	if err != nil {
 		return nil, err
 	}
-	cfg.TrustXForwardedFor, err = envBool("TRUST_X_FORWARDED_FOR")
+	cfg.TrustXForwardedFor, err = envBool(src, "TRUST_X_FORWARDED_FOR")
 	if err != nil {
 		return nil, err
 	}
-	if err := loadEvents(cfg); err != nil {
+	cfg.ReadOnly, err = envBool(src, "READ_ONLY")
+	if err != nil {
 		return nil, err
 	}
-	if err := loadSigning(cfg); err != nil {
+	cfg.APITokens, err = ParseAPITokens(src.Getenv("API_TOKENS"))
+	if err != nil {
 		return nil, err
 	}
 
-	maxConns, err := envPoolSize("DATABASE_MAX_CONNS", MinDatabaseMaxConns)
+	maxConns, err := envPoolSize(src, "DATABASE_MAX_CONNS", MinDatabaseMaxConns)
 	if err != nil {
 		return nil, err
 	}
-	minConns, err := envPoolSize("DATABASE_MIN_CONNS", 0)
+	minConns, err := envPoolSize(src, "DATABASE_MIN_CONNS", 0)
 	if err != nil {
 		return nil, err
 	}
@@ -273,6 +442,13 @@ func Load() (*Config, error) {
 		}
 	}
 
+	if err := loadEvents(cfg, src); err != nil {
+		return nil, err
+	}
+	if err := loadSigning(cfg, src); err != nil {
+		return nil, err
+	}
+
 	if cfg.DatabaseURL == "" {
 		return nil, errors.New("config: DATABASE_URL or DATABASE_URL_FILE is required")
 	}
@@ -284,10 +460,10 @@ func Load() (*Config, error) {
 }
 
 // loadEvents reads the event-driven refresh settings.
-func loadEvents(cfg *Config) error {
+func loadEvents(cfg *Config, src *source) error {
 	cfg.RefreshEventsInterval = DefaultRefreshEventsInterval
 
-	if raw := strings.TrimSpace(os.Getenv("REFRESH_EVENTS")); raw != "" {
+	if raw := strings.TrimSpace(src.Getenv("REFRESH_EVENTS")); raw != "" {
 		on, err := strconv.ParseBool(raw)
 		if err != nil {
 			return fmt.Errorf("config: REFRESH_EVENTS %q: want true or false", raw)
@@ -295,7 +471,7 @@ func loadEvents(cfg *Config) error {
 		cfg.RefreshEvents = on
 	}
 
-	if raw := os.Getenv("REFRESH_EVENTS_INTERVAL"); raw != "" {
+	if raw := src.Getenv("REFRESH_EVENTS_INTERVAL"); raw != "" {
 		d, err := time.ParseDuration(raw)
 		if err != nil {
 			return fmt.Errorf("config: REFRESH_EVENTS_INTERVAL %q: %w", raw, err)
@@ -318,9 +494,9 @@ func loadEvents(cfg *Config) error {
 //
 // Like the database URL, the signing key can come from a file
 // (SIGNING_KEY_FILE) so it never has to enter the environment.
-func loadSigning(cfg *Config) error {
-	inline := strings.TrimSpace(os.Getenv("SIGNING_KEY"))
-	path := os.Getenv("SIGNING_KEY_FILE")
+func loadSigning(cfg *Config, src *source) error {
+	inline := strings.TrimSpace(src.Getenv("SIGNING_KEY"))
+	path := src.Getenv("SIGNING_KEY_FILE")
 	if inline != "" && path != "" {
 		return errors.New("config: set either SIGNING_KEY or SIGNING_KEY_FILE, not both")
 	}
@@ -345,7 +521,7 @@ func loadSigning(cfg *Config) error {
 		cfg.Signer = signer
 	}
 
-	for _, raw := range strings.Split(os.Getenv("SIGNING_RETIRED_KEYS"), ",") {
+	for _, raw := range strings.Split(src.Getenv("SIGNING_RETIRED_KEYS"), ",") {
 		raw = strings.TrimSpace(raw)
 		if raw == "" {
 			continue
@@ -376,19 +552,35 @@ func checkWebhookURL(raw string) error {
 	return nil
 }
 
-// DatabaseURLFromEnv resolves the Postgres connection string.
-//
-// It is DATABASE_URL, or the contents of the file named by DATABASE_URL_FILE
+// DatabaseURL resolves the Postgres connection string over the same
+// layering LoadWith uses: the --config file may name either setting, and
+// the environment decides when both layers speak for the same name.
+// Commands that only need the connection string call it, so a file-layer
+// DATABASE_URL works for them too.
+func DatabaseURL(configPath string) (string, error) {
+	src := &source{}
+	if configPath != "" {
+		file, err := loadConfigFile(configPath)
+		if err != nil {
+			return "", err
+		}
+		src.file = file
+	}
+	return databaseURL(src)
+}
+
+// databaseURL resolves the connection string over a config source: it is
+// DATABASE_URL, or the contents of the file named by DATABASE_URL_FILE
 // when that is set instead. Docker secrets, Swarm secrets and Kubernetes
-// Secret volumes hand credentials over as files; a value that never enters the
-// environment cannot leak through `docker inspect`, an error report or the
-// environment of every child process the way an exported variable can.
+// Secret volumes hand credentials over as files; a value that never enters
+// the environment cannot leak through `docker inspect`, an error report or
+// the environment of every child process the way an exported variable can.
 //
-// Setting both is a configuration mistake rather than a preference, so it is
-// an error instead of a silent pick.
-func DatabaseURLFromEnv() (string, error) {
-	inline := os.Getenv("DATABASE_URL")
-	path := os.Getenv("DATABASE_URL_FILE")
+// Setting both is a configuration mistake rather than a preference, so it
+// is an error instead of a silent pick.
+func databaseURL(src *source) (string, error) {
+	inline := src.Getenv("DATABASE_URL")
+	path := src.Getenv("DATABASE_URL_FILE")
 
 	if inline != "" && path != "" {
 		return "", errors.New("config: set either DATABASE_URL or DATABASE_URL_FILE, not both")
@@ -477,8 +669,8 @@ func parseCORSOrigins(raw string) ([]string, error) {
 	return origins, nil
 }
 
-func envIntDefault(name string, fallback, min, max int) (int, error) {
-	raw := strings.TrimSpace(os.Getenv(name))
+func envIntDefault(src *source, name string, fallback, min, max int) (int, error) {
+	raw := strings.TrimSpace(src.Getenv(name))
 	if raw == "" {
 		return fallback, nil
 	}
@@ -493,8 +685,8 @@ func envIntDefault(name string, fallback, min, max int) (int, error) {
 	return n, nil
 }
 
-func envBool(name string) (bool, error) {
-	raw := strings.TrimSpace(os.Getenv(name))
+func envBool(src *source, name string) (bool, error) {
+	raw := strings.TrimSpace(src.Getenv(name))
 	if raw == "" {
 		return false, nil
 	}
@@ -505,21 +697,21 @@ func envBool(name string) (bool, error) {
 	return v, nil
 }
 
-func envOr(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
+func envOr(src *source, key, fallback string) string {
+	if v := src.Getenv(key); v != "" {
 		return v
 	}
 	return fallback
 }
 
-// envInt reads an integer from the environment.
+// envInt reads an integer from the configuration source.
 //
 // An unset or empty variable yields zero, which means "not configured". A
 // value that is not a whole number, or that falls outside the accepted
 // range, is an error: a limit of zero registrations would stop the registry
 // working, and one of thousands would not be a limit.
-func envInt(name string, min, max int) (int, error) {
-	raw := strings.TrimSpace(os.Getenv(name))
+func envInt(src *source, name string, min, max int) (int, error) {
+	raw := strings.TrimSpace(src.Getenv(name))
 	if raw == "" {
 		return 0, nil
 	}
@@ -540,8 +732,8 @@ func envInt(name string, min, max int) (int, error) {
 // alone". A value that is not a number, or that falls outside the accepted
 // range, is an error: a pool that is too small cannot serve a request, and
 // one that is too large is nearly always a typo.
-func envPoolSize(name string, min int32) (int32, error) {
-	raw := strings.TrimSpace(os.Getenv(name))
+func envPoolSize(src *source, name string, min int32) (int32, error) {
+	raw := strings.TrimSpace(src.Getenv(name))
 	if raw == "" {
 		return 0, nil
 	}

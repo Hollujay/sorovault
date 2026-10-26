@@ -124,6 +124,16 @@ func unique(values []string) []string {
 	return out
 }
 
+// pageIDs lists a page's contract IDs in arriving order, for asserting the
+// listing's rank.
+func pageIDs(p *store.ContractPage) []string {
+	out := make([]string, 0, len(p.Contracts))
+	for _, c := range p.Contracts {
+		out = append(out, c.ContractID)
+	}
+	return out
+}
+
 const (
 	idA = "CDZZXVGUCLBUTE3WDD6TF2NXPTBPOYTVPPBBIZMSPVIQLUG226XJ4PAN"
 	idB = "CDZZZPYQALFRBQAZD5KCW2SZK4ZF455PJVD7H53AGHXTWAJO4BYVPP2V"
@@ -227,6 +237,94 @@ func runStoreSuite(t *testing.T, newStore factory) {
 		got, err = s.GetContract(ctx, "testnet", idA)
 		require.NoError(t, err)
 		assert.Equal(t, "https://github.com/example/repo", got.SourceURL, "refresh must preserve source metadata")
+	})
+
+	t.Run("a deprecation mark survives refresh and clears cleanly", func(t *testing.T) {
+		s := newStore(t)
+		ctx := context.Background()
+
+		require.NoError(t, s.Save(ctx, contract(idA, "testnet", "hash1"), iface("balance")))
+		require.NoError(t, s.Save(ctx, contract(idB, "testnet", "hash2"), iface("balance")))
+
+		require.NoError(t, s.SetDeprecation(ctx, "testnet", idA, idB, "Move voting to the replacement."))
+		got, err := s.GetContract(ctx, "testnet", idA)
+		require.NoError(t, err)
+		require.NotNil(t, got.DeprecatedSince, "the mark carries the moment it was set")
+		assert.Equal(t, idB, got.Successor)
+		assert.Equal(t, "Move voting to the replacement.", got.DeprecationNote)
+
+		// A refresh does not revisit the mark: a contract being live on
+		// the network says nothing about whether it should still be used.
+		require.NoError(t, s.Save(ctx, contract(idA, "testnet", "hash3"), iface("balance-v2")))
+		got, err = s.GetContract(ctx, "testnet", idA)
+		require.NoError(t, err)
+		assert.NotNil(t, got.DeprecatedSince, "a refresh does not un-deprecate a contract")
+		assert.Equal(t, idB, got.Successor)
+
+		// Without a successor or note, only the timestamp is set.
+		require.NoError(t, s.Save(ctx, contract(idB, "testnet", "hash2"), iface("balance")))
+		require.NoError(t, s.ClearDeprecation(ctx, "testnet", idB))
+		require.NoError(t, s.SetDeprecation(ctx, "testnet", idB, "", ""))
+		got, err = s.GetContract(ctx, "testnet", idB)
+		require.NoError(t, err)
+		assert.NotNil(t, got.DeprecatedSince)
+		assert.Empty(t, got.Successor)
+		assert.Empty(t, got.DeprecationNote)
+
+		// Clearing drops the whole mark.
+		require.NoError(t, s.ClearDeprecation(ctx, "testnet", idA))
+		got, err = s.GetContract(ctx, "testnet", idA)
+		require.NoError(t, err)
+		assert.Nil(t, got.DeprecatedSince)
+		assert.Empty(t, got.Successor)
+		assert.Empty(t, got.DeprecationNote)
+
+		// Unknown contracts are not silently marked.
+		err = s.SetDeprecation(ctx, "testnet", "CDZZNOPE", "", "")
+		assert.ErrorIs(t, err, store.ErrNotFound)
+		err = s.ClearDeprecation(ctx, "testnet", "CDZZNOPE")
+		assert.ErrorIs(t, err, store.ErrNotFound)
+	})
+
+	t.Run("a deprecation mark rides listings, exports and imports", func(t *testing.T) {
+		s := newStore(t)
+		ctx := context.Background()
+
+		require.NoError(t, s.Save(ctx, contract(idA, "testnet", "hash1"), iface("balance")))
+		require.NoError(t, s.Save(ctx, contract(idB, "testnet", "hash2"), iface("balance")))
+		require.NoError(t, s.SetDeprecation(ctx, "testnet", idB, idA, "Move over."))
+
+		page, err := s.ListContracts(ctx, store.ListFilter{Network: "testnet"})
+		require.NoError(t, err)
+		require.Equal(t, 2, page.Total)
+		for _, c := range page.Contracts {
+			if c.ContractID != idB {
+				assert.Nil(t, c.DeprecatedSince, idA+" is still in active use")
+				continue
+			}
+			assert.NotNil(t, c.DeprecatedSince, "the listing carries the mark")
+			assert.Equal(t, idA, c.Successor)
+			assert.Equal(t, "Move over.", c.DeprecationNote)
+		}
+
+		before, err := s.Export(ctx)
+		require.NoError(t, err)
+		for _, cs := range before.Contracts {
+			if cs.Contract.ContractID == idB {
+				require.NotNil(t, cs.Contract.DeprecatedSince, "the snapshot carries the mark")
+				assert.Equal(t, idA, cs.Contract.Successor)
+				assert.Equal(t, "Move over.", cs.Contract.DeprecationNote)
+			}
+		}
+
+		// A fresh store restores the whole mark.
+		other := newStore(t)
+		require.NoError(t, other.Import(ctx, before, false))
+		got, err := other.GetContract(ctx, "testnet", idB)
+		require.NoError(t, err)
+		require.NotNil(t, got.DeprecatedSince)
+		assert.Equal(t, idA, got.Successor)
+		assert.Equal(t, "Move over.", got.DeprecationNote)
 	})
 
 	t.Run("missing rows report ErrNotFound", func(t *testing.T) {
@@ -569,6 +667,119 @@ func runStoreSuite(t *testing.T, newStore factory) {
 		require.Equal(t, 1, page.Total)
 		assert.Equal(t, []string{"Voted", "vote"}, page.Contracts[0].Matches,
 			"events are searchable too")
+	})
+
+	t.Run("search matches doc comments when no name does", func(t *testing.T) {
+		s := newStore(t)
+		ctx := context.Background()
+
+		mint := iface("mint")
+		mint.Functions[0].Doc = "Mints new tokens to a recipient and emits a Minted event."
+		burn := iface("burn")
+		burn.Functions[0].Doc = "Burns tokens from the caller."
+		receipt := model.Struct{
+			Name: "BurnReceipt", Fields: []model.StructField{},
+			Doc: "Records who initiated the burn.",
+		}
+		burn.Types.Structs = append(burn.Types.Structs, receipt)
+		require.NoError(t, s.Save(ctx, contract(idA, "testnet", "h1"), mint))
+		require.NoError(t, s.Save(ctx, contract(idB, "testnet", "h2"), burn))
+
+		page, err := s.ListContracts(ctx, store.ListFilter{Query: "recipient"})
+		require.NoError(t, err)
+		require.Equal(t, 1, page.Total, "a word only a function's doc carries is searchable")
+		assert.Equal(t, idA, page.Contracts[0].ContractID)
+		assert.Empty(t, page.Contracts[0].Matches, "a doc match is not a symbol match")
+
+		page, err = s.ListContracts(ctx, store.ListFilter{Query: "initiated"})
+		require.NoError(t, err)
+		require.Equal(t, 1, page.Total, "a word only a type's doc carries is searchable")
+		assert.Equal(t, idB, page.Contracts[0].ContractID)
+
+		page, err = s.ListContracts(ctx, store.ListFilter{Query: "recipient tokens"})
+		require.NoError(t, err)
+		require.Equal(t, 1, page.Total, "every word of the query must be found in the docs")
+
+		page, err = s.ListContracts(ctx, store.ListFilter{Query: "recipient nowhere"})
+		require.NoError(t, err)
+		assert.Zero(t, page.Total, "one missing word rules the doc out")
+
+		page, err = s.ListContracts(ctx, store.ListFilter{Query: "%%%!!!"})
+		require.NoError(t, err)
+		assert.Zero(t, page.Total, "a query with nothing word-like in it matches no doc")
+
+		page, err = s.ListContracts(ctx, store.ListFilter{Query: "min"})
+		require.Equal(t, 1, page.Total, "a query both a symbol and a doc carry ranks as a name hit")
+		require.NoError(t, err)
+		assert.Equal(t, []string{"mint"}, page.Contracts[0].Matches,
+			"a doc hit that also names a symbol still reports the symbol match")
+	})
+
+	t.Run("a name match ranks ahead of a doc match", func(t *testing.T) {
+		s := newStore(t)
+		ctx := context.Background()
+
+		// The doc-only contract is saved second, so it refreshed last and
+		// would sort in front on refresh time alone; the listing ranks the
+		// symbol hit ahead of it regardless.
+		documented := iface("send")
+		documented.Functions[0].Doc = "Sends value across chains via a swap."
+		require.NoError(t, s.Save(ctx, contract(idB, "testnet", "h2"), iface("swap")))
+		require.NoError(t, s.Save(ctx, contract(idA, "testnet", "h1"), documented))
+
+		page, err := s.ListContracts(ctx, store.ListFilter{Query: "swap"})
+		require.NoError(t, err)
+		require.Equal(t, 2, page.Total)
+		assert.Equal(t, []string{idB, idA}, pageIDs(page),
+			"the symbol hit is listed first even though the doc hit refreshed last")
+	})
+
+	t.Run("a cursor walk with a query crosses the rank boundary", func(t *testing.T) {
+		s := newStore(t)
+		ctx := context.Background()
+
+		documented := iface("send")
+		documented.Functions[0].Doc = "Sends value across chains via a swap."
+		require.NoError(t, s.Save(ctx, contract(idB, "testnet", "h2"), iface("swap")))
+		require.NoError(t, s.Save(ctx, contract(idA, "testnet", "h1"), documented))
+
+		var seen []string
+		cursor := ""
+		for {
+			page, err := s.ListContracts(ctx, store.ListFilter{Query: "swap", Limit: 1, Cursor: cursor})
+			require.NoError(t, err)
+			for _, c := range page.Contracts {
+				seen = append(seen, c.ContractID)
+			}
+			if page.Next == "" {
+				break
+			}
+			cursor = page.Next
+		}
+		require.Len(t, unique(seen), 2, "the walk reaches both tiers of the listing")
+		assert.Equal(t, idB, seen[0], "the name tier is walked first")
+		assert.Equal(t, idA, seen[1], "the doc tier is walked second")
+	})
+
+	t.Run("doc search uses only the current interface", func(t *testing.T) {
+		s := newStore(t)
+		ctx := context.Background()
+
+		oldVersion := iface("mint")
+		oldVersion.Functions[0].Doc = "Mints tokens at a discount while the sale is on."
+		require.NoError(t, s.Save(ctx, contract(idA, "testnet", "h1"), oldVersion))
+
+		page, err := s.ListContracts(ctx, store.ListFilter{Query: "discount"})
+		require.NoError(t, err)
+		require.Equal(t, 1, page.Total)
+
+		upgraded := iface("mint")
+		upgraded.Functions[0].Doc = "Mints tokens to a recipient."
+		require.NoError(t, s.Save(ctx, contract(idA, "testnet", "h2"), upgraded))
+
+		page, err = s.ListContracts(ctx, store.ListFilter{Query: "discount"})
+		require.NoError(t, err)
+		assert.Zero(t, page.Total, "a doc removed by an upgrade must stop matching")
 	})
 
 	t.Run("search uses only the current interface", func(t *testing.T) {

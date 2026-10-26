@@ -2,14 +2,17 @@
 //
 // The API is read-mostly: the only write is registering or refreshing a
 // contract, which does not change the contract itself, only what SoroVault
-// knows about it. There is no authentication — deployment is expected to put
-// the service behind whatever the operator already uses.
+// knows about it. There is no authentication by default — deployment is
+// expected to put the service behind whatever the operator already uses —
+// and when API tokens are configured, write endpoints require a bearer
+// credential while reads stay public.
 package api
 
 import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"crypto/subtle"
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
@@ -55,6 +58,15 @@ type Server struct {
 	// published at GET /api/keys: the signer's, then any retired ones.
 	signer *attest.Signer
 	keys   []attest.Key
+
+	// readOnly marks a mirror that refuses writes. It is read once, when
+	// Routes mounts, so a server's mode is fixed at startup.
+	readOnly bool
+
+	// tokens are the bearer credentials writes must present. Empty keeps
+	// every write public, as the API has always behaved; they are held
+	// here and compared in constant time, and never logged or echoed.
+	tokens []string
 }
 
 // NewServer builds an API server over a registry.
@@ -63,6 +75,24 @@ func NewServer(reg *registry.Registry, log *slog.Logger) *Server {
 		log = slog.Default()
 	}
 	return &Server{reg: reg, log: log, cache: newInterfaceCache(interfaceCacheBytes)}
+}
+
+// SetReadOnly makes the server's write routes refuse with 405 instead of
+// running: reads stay public, and the automatic refresher outside the API
+// keeps the registry current. Call it before Routes mounts the routes,
+// where the choice between a real handler and a refusal is made once. It
+// mirrors SetLastSweep, which serve also sets at startup.
+func (s *Server) SetReadOnly(readOnly bool) {
+	s.readOnly = readOnly
+}
+
+// SetAPITokens requires write routes to present one of the given bearer
+// tokens. Call it before Routes mounts, where the gate is built once.
+// An empty list keeps every write public; values are compared in constant
+// time, and nothing logs or echoes them, matching how the config keeps
+// them out of trouble.
+func (s *Server) SetAPITokens(tokens []string) {
+	s.tokens = tokens
 }
 
 // SetLastSweep makes GET /api/stats report the most recent automatic
@@ -96,16 +126,20 @@ func (s *Server) Routes() chi.Router {
 	r.Use(compressResponses("application/json", "text/plain"))
 
 	r.Get("/contracts", s.listContracts)
-	r.Post("/contracts", s.rateLimited(s.registerContract))
-	r.Post("/contracts:batch", s.batchRegisterContracts)
+	// POST /decode stays available in read-only mode: it answers with the
+	// decoded module and stores nothing, so it is a read with POST form.
 	r.Post("/decode", s.rateLimited(s.decodeWasm))
+	r.Post("/contracts", s.write(s.rateLimited(s.registerContract)))
+	r.Post("/contracts:batch", s.write(s.batchRegisterContracts))
 	r.Get("/wasm/{hash}", s.getWasmSpec)
-	r.Post("/wasm/{hash}", s.catalogWasm)
+	r.Post("/wasm/{hash}", s.write(s.catalogWasm))
 	r.Get("/wasm/{hash}/contracts", s.listWasmContracts)
 	r.Get("/contracts/{id}", s.getContract)
-	r.Put("/contracts/{id}/source", s.updateContractSource)
-	r.Post("/contracts/{id}/verify", s.verifyPublisher)
-	r.Post("/contracts/{id}/refresh", s.rateLimited(s.refreshContract))
+	r.Put("/contracts/{id}/source", s.write(s.updateContractSource))
+	r.Post("/contracts/{id}/verify", s.write(s.verifyPublisher))
+	r.Put("/contracts/{id}/deprecation", s.write(s.setContractDeprecation))
+	r.Delete("/contracts/{id}/deprecation", s.write(s.clearContractDeprecation))
+	r.Post("/contracts/{id}/refresh", s.write(s.rateLimited(s.refreshContract)))
 	r.Get("/contracts/{id}/versions", s.listVersions)
 	r.Get("/contracts/{id}/functions", s.listFunctions)
 	r.Get("/contracts/{id}/events", s.listEvents)
@@ -118,11 +152,66 @@ func (s *Server) Routes() chi.Router {
 	r.Get("/upgrades", s.listUpgrades)
 	r.Get("/upgrades.atom", s.upgradesAtom)
 	r.Get("/openapi.json", serveOpenAPI)
-	r.Post("/subscriptions", s.subscribeContract)
+	r.Post("/subscriptions", s.write(s.subscribeContract))
 	r.Get("/subscriptions", s.listSubscriptions)
-	r.Delete("/subscriptions/{secret}", s.unsubscribeContract)
+	r.Delete("/subscriptions/{secret}", s.write(s.unsubscribeContract))
 
 	return r
+}
+
+// write chooses at mount time what a write route does: its real handler in
+// normal operation, or a 405 refusal in read-only mode. The routes stay
+// mounted either way, so a writer hitting a read-only mirror is told the
+// method is refused rather than sent a 404 that reads as an unknown
+// resource.
+func (s *Server) write(h http.HandlerFunc) http.HandlerFunc {
+	if s.readOnly {
+		return func(w http.ResponseWriter, r *http.Request) {
+			writeError(w, http.StatusMethodNotAllowed,
+				"this SoroVault is running read-only; write access is disabled")
+		}
+	}
+	if len(s.tokens) > 0 {
+		return s.requireBearer(h)
+	}
+	return h
+}
+
+// requireBearer serves the wrapped route only when the request presents
+// one of the configured tokens as `Authorization: Bearer <token>`.
+//
+// Malformed credentials and wrong tokens get different status codes — a
+// malformed header is a client mistake worth teaching, while a valid
+// header with the wrong secret is an access attempt and only ever earns
+// "unauthorized", which carries the presented secret nowhere.
+func (s *Server) requireBearer(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if !ok {
+			writeError(w, http.StatusBadRequest,
+				"Authorization header must be Bearer authentication")
+			return
+		}
+		if !s.tokenMatches(token) {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="sorovault"`)
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		next(w, r)
+	}
+}
+
+// tokenMatches compares a presented secret against every configured token
+// regardless of any match: the loop runs whole, so success is not told
+// apart from failure by how early it stopped. Every comparison is
+// constant time; lengths differ, subtleties and all, so timing leaks
+// nothing more than the response does.
+func (s *Server) tokenMatches(presented string) bool {
+	matches := 0
+	for _, token := range s.tokens {
+		matches |= subtle.ConstantTimeCompare([]byte(presented), []byte(token))
+	}
+	return matches == 1
 }
 
 var commitHash = regexp.MustCompile(`^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$`)
@@ -439,6 +528,77 @@ func (s *Server) verifyPublisher(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, contract)
 }
 
+// deprecationRequest is the body of PUT /contracts/{id}/deprecation. Both
+// fields are optional: a contract can be retired without a recorded
+// destination.
+type deprecationRequest struct {
+	Successor string `json:"successor,omitempty"`
+	Note      string `json:"note,omitempty"`
+}
+
+// setContractDeprecation serves PUT
+// /api/contracts/{id}/deprecation: mark a contract deprecated, with an
+// optional successor and note. It answers with the updated contract, the
+// same shape the source endpoint answers with.
+func (s *Server) setContractDeprecation(w http.ResponseWriter, r *http.Request) {
+	var req deprecationRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	network, err := s.network(r)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	contractID := chi.URLParam(r, "id")
+	successor := strings.TrimSpace(req.Successor)
+	if successor == contractID {
+		writeError(w, http.StatusBadRequest,
+			"the successor must be a contract other than the one being deprecated")
+		return
+	}
+	if successor != "" {
+		if _, err := s.reg.Store().GetContract(r.Context(), network, successor); err != nil {
+			writeError(w, http.StatusBadRequest, "successor "+successor+" is not registered on "+network)
+			return
+		}
+	}
+	if err := s.reg.Store().SetDeprecation(r.Context(), network, contractID, successor,
+		strings.TrimSpace(req.Note)); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	contract, err := s.reg.Store().GetContract(r.Context(), network, contractID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, contract)
+}
+
+// clearContractDeprecation serves DELETE
+// /api/contracts/{id}/deprecation: lift the mark, restoring the contract
+// to active use.
+func (s *Server) clearContractDeprecation(w http.ResponseWriter, r *http.Request) {
+	network, err := s.network(r)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	contractID := chi.URLParam(r, "id")
+	if err := s.reg.Store().ClearDeprecation(r.Context(), network, contractID); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	contract, err := s.reg.Store().GetContract(r.Context(), network, contractID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, contract)
+}
+
 // openAPISpec describes every route above. TestOpenAPICoversEveryRoute
 // fails if a route is added without documenting it, or documented without
 // existing.
@@ -470,11 +630,24 @@ func (s *Server) getTypeScriptClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var deprecation *codegen.Deprecation
+	if contract, err := s.reg.Store().GetContract(r.Context(), network, contractID); err == nil && contract.DeprecatedSince != nil {
+		// The client is generated from the interface, but the mark is
+		// on the contract: a generated file exported today should warn
+		// its importer about a migration that happened last week.
+		deprecation = &codegen.Deprecation{
+			Since:     contract.DeprecatedSince.UTC().Format(time.RFC3339),
+			Successor: contract.Successor,
+			Note:      contract.DeprecationNote,
+		}
+	}
+
 	source, err := codegen.TypeScript(stored.Interface, codegen.Source{
-		ContractID: stored.ContractID,
-		Network:    stored.Network,
-		WasmHash:   stored.WasmHash,
-		WithZod:    r.URL.Query().Get("zod") != "",
+		ContractID:  stored.ContractID,
+		Network:     stored.Network,
+		WasmHash:    stored.WasmHash,
+		Deprecation: deprecation,
+		WithZod:     r.URL.Query().Get("zod") != "",
 	})
 	if err != nil {
 		// The interface decoded, but cannot be expressed as TypeScript —
@@ -639,6 +812,7 @@ func (s *Server) getStats(w http.ResponseWriter, r *http.Request) {
 		Contracts:      stats.Contracts,
 		Versions:       stats.Versions,
 		LatestContract: stats.Latest,
+		ReadOnly:       s.readOnly,
 	}
 	if s.lastSweep != nil {
 		if record, ok := s.lastSweep(); ok {
@@ -767,11 +941,6 @@ func (s *Server) getContract(w http.ResponseWriter, r *http.Request) {
 		s.cache.add(key, cached)
 	}
 
-	s.attest(w, r, attest.Statement{
-		Network: contract.Network, ContractID: contract.ContractID,
-		WasmHash: cacheHash, Interface: cached.body,
-	})
-
 	// The header has to be set before the body is written.
 	if r.URL.Query().Get("download") != "" {
 		w.Header().Set("Content-Disposition", `attachment; filename="`+ABIFilename(contractID, cacheHash)+`"`)
@@ -784,6 +953,10 @@ func (s *Server) getContract(w http.ResponseWriter, r *http.Request) {
 		responseHash = ""
 		interfaceID = stellar.BuiltinSACIdentifier
 	}
+	s.attest(w, r, attest.Statement{
+		Network: contract.Network, ContractID: contract.ContractID,
+		WasmHash: cacheHash, Interface: cached.body,
+	})
 	writeJSON(w, http.StatusOK, contractResponse{
 		ContractID:   contract.ContractID,
 		Network:      contract.Network,

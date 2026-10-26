@@ -1,7 +1,9 @@
 # Build output. The leading slash matters: a bare "sorovault" would also
-# match the cmd/sorovault package directory.
+# match the cmd/sorovault package directory, and the .exe form is what
+# the Windows toolchain writes.
 /bin/
 /sorovault
+/sorovault.exe
 
 # Coverage
 coverage.out

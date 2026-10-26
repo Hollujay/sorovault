@@ -3,7 +3,8 @@
 
 <h1>Registered contracts</h1>
 <p class="lede">
-  Every contract SoroVault has fetched and decoded. Search by contract ID or name.
+  Every contract SoroVault has fetched and decoded. Search by contract ID or
+  name; queries that match no name look inside the contract's documentation.
 </p>
 
 {{/* A plain GET form, so search still works with scripting off; htmx
@@ -31,11 +32,17 @@
 
 {{template "contract_rows.html" .}}
 
+{{if .ReadOnly}}
+<p class="notice">This registry is read-only; registering is disabled.</p>
+{{else if .WriteAuthRequired}}
+<p class="notice">This registry requires an API token to register contracts; the browser form is disabled. Use the JSON API with <code>Authorization: Bearer &lt;token&gt;</code>.</p>
+{{else}}
 <section>
   <h2>Register a contract</h2>
   <p class="dim">Fetch a contract's interface from the network and add it to the registry.</p>
   {{template "register.html" (registerForm .ContractID .RegisterError)}}
 </section>
+{{end}}
 
 {{template "page_foot"}}
 {{end}}

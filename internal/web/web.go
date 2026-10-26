@@ -38,6 +38,15 @@ type Server struct {
 	log       *slog.Logger
 	templates *template.Template
 	publicURL string
+
+	// readOnly hides the register form and refuses the registration POST
+	// with a page at 405. Set once before Routes mounts.
+	readOnly bool
+
+	// writeAuthRequired is the same idea for token-gated writes: the form
+	// has no way to carry a secret, so it goes away too, and the POST
+	// routes answer with the API's 401.
+	writeAuthRequired bool
 }
 
 const contractsPerPage = 100
@@ -63,6 +72,22 @@ func (s *Server) SetPublicURL(base string) {
 	s.publicURL = strings.TrimRight(base, "/")
 }
 
+// SetReadOnly hides the browse UI's register form and refuses its POST
+// with a 405 page: a mirror exists to be browsed, not written to. Call it
+// before Routes, where the mode is fixed.
+func (s *Server) SetReadOnly(readOnly bool) {
+	s.readOnly = readOnly
+}
+
+// SetWriteAuthRequired hides the browse UI's register form when the API
+// requires bearer tokens on writes: a plain HTML form cannot carry a
+// secret without handing it to whoever uses the browser, so the form
+// would only raise hopes. The POST route is refused with the message the
+// form would have raised. Call it before Routes.
+func (s *Server) SetWriteAuthRequired(required bool) {
+	s.writeAuthRequired = required
+}
+
 func (s *Server) Routes() chi.Router {
 	r := chi.NewRouter()
 	r.Use(securityHeaders)
@@ -70,12 +95,41 @@ func (s *Server) Routes() chi.Router {
 	r.Get("/", s.index)
 	r.Get("/sitemap.xml", s.sitemap)
 	r.Get("/sitemap-{page}.xml", s.sitemapPage)
-	r.Post("/contracts", s.register)
+	r.Post("/contracts", s.write(s.register))
 	r.Get("/contracts/{id}", s.contract)
 	r.Get("/partials/contracts", s.contractRows)
 	r.Handle("/static/*", http.FileServer(http.FS(assets)))
 
 	return r
+}
+
+// write chooses at mount time what the registration POST does: the form's
+// handler normally, a 405 page in read-only mode, and — when the API
+// requires bearer tokens — a 401 page, since a browser has no way to
+// carry the secret the form would need anyway. The route stays mounted
+// either way, so a writer is told what is refused rather than sent a 404
+// that reads as an unknown resource.
+func (s *Server) write(h http.HandlerFunc) http.HandlerFunc {
+	if s.readOnly {
+		return s.refuse(http.StatusMethodNotAllowed,
+			"This SoroVault is running read-only; registering is disabled.")
+	}
+	if s.writeAuthRequired {
+		return s.refuse(http.StatusUnauthorized,
+			"This SoroVault requires an API token to register contracts; "+
+				"use the JSON API with `Authorization: Bearer <token>`.")
+	}
+	return h
+}
+
+// refuse renders one of the two write-refusal pages at its status.
+func (s *Server) refuse(status int, message string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		s.renderStatus(w, r, status, "error.html", errorData{
+			Status:  status,
+			Message: message,
+		})
+	}
 }
 
 // securityHeaders hardens every UI response.
@@ -132,6 +186,8 @@ func (s *Server) indexPage(w http.ResponseWriter, r *http.Request, status int, d
 	data.Total = page.Total
 	data.Page = pageNumber
 	data.PageCount = pageCount(page.Total)
+	data.ReadOnly = s.readOnly
+	data.WriteAuthRequired = s.writeAuthRequired
 
 	s.renderStatus(w, r, status, "index.html", data)
 }
@@ -434,6 +490,13 @@ type indexData struct {
 	// behind: the ID to correct, and why it was refused.
 	ContractID    string
 	RegisterError string
+
+	// ReadOnly hides the register form: a mirror refuses writes.
+	ReadOnly bool
+
+	// WriteAuthRequired is the same hiding for token-gated writes: the
+	// form cannot carry the secret a write would need.
+	WriteAuthRequired bool
 }
 
 // registerData is the registration form and the message under it.

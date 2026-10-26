@@ -29,7 +29,9 @@ func setEnv(t *testing.T, vars map[string]string) {
 		"MAX_CONCURRENT_REGISTRATIONS", "REFRESH_WEBHOOK_URL",
 		"REFRESH_WEBHOOK_SECRET", "REFRESH_EVENTS", "REFRESH_EVENTS_INTERVAL",
 		"SIGNING_KEY", "SIGNING_KEY_FILE", "SIGNING_RETIRED_KEYS",
-		"CORS_ORIGINS", "RATE_LIMIT_PER_MINUTE", "RATE_LIMIT_BURST", "TRUST_X_FORWARDED_FOR",
+		"CORS_ORIGINS", "RATE_LIMIT_PER_MINUTE",
+		"RATE_LIMIT_BURST", "TRUST_X_FORWARDED_FOR", "READ_ONLY",
+		"API_TOKENS",
 		"DATABASE_MAX_CONNS", "DATABASE_MIN_CONNS",
 	} {
 		if v, ok := vars[key]; ok {
@@ -513,6 +515,27 @@ func TestRateLimit(t *testing.T) {
 		assert.True(t, cfg.TrustXForwardedFor)
 	})
 
+	t.Run("read-only", func(t *testing.T) {
+		setEnv(t, map[string]string{
+			"DATABASE_URL": testDatabaseURL,
+			"READ_ONLY":    "true",
+		})
+
+		cfg, err := config.Load()
+		require.NoError(t, err)
+		assert.True(t, cfg.ReadOnly)
+	})
+
+	t.Run("invalid read-only boolean", func(t *testing.T) {
+		setEnv(t, map[string]string{
+			"DATABASE_URL": testDatabaseURL,
+			"READ_ONLY":    "sometimes",
+		})
+
+		_, err := config.Load()
+		require.Error(t, err)
+	})
+
 	t.Run("invalid burst and boolean", func(t *testing.T) {
 		for _, vars := range []map[string]string{
 			{"RATE_LIMIT_BURST": "0"},
@@ -529,6 +552,144 @@ func TestRateLimit(t *testing.T) {
 			require.Error(t, err)
 		}
 	})
+}
+
+func TestParseAPITokens(t *testing.T) {
+	t.Parallel()
+
+	t.Run("several tokens for rotation", func(t *testing.T) {
+		tokens, err := config.ParseAPITokens("0123456789abcdef-aaa , 0987654321fedcba-bbb ,0123456789abcdef-ccc")
+		require.NoError(t, err)
+		assert.Equal(t, []string{
+			"0123456789abcdef-aaa", "0987654321fedcba-bbb", "0123456789abcdef-ccc",
+		}, tokens, "entries are trimmed but a token's own bytes are kept")
+	})
+
+	t.Run("empty keeps writes public", func(t *testing.T) {
+		for _, raw := range []string{"", "  "} {
+			tokens, err := config.ParseAPITokens(raw)
+			require.NoError(t, err)
+			assert.Empty(t, tokens)
+		}
+	})
+
+	t.Run("mistakes refuse to boot", func(t *testing.T) {
+		for name, raw := range map[string]string{
+			"too short":  "short",
+			"duplicate":  "0123456789abcdef-aaa, 0123456789abcdef-aaa",
+			"a space in": "0123456789abcdef-aaa bbb",
+		} {
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+
+				_, err := config.ParseAPITokens(raw)
+				require.Error(t, err)
+			})
+		}
+	})
+}
+
+func TestLoadAPITokens(t *testing.T) {
+	setEnv(t, map[string]string{
+		"DATABASE_URL": testDatabaseURL,
+		"API_TOKENS":   "0123456789abcdef-aaa,0987654321fedcba-bbb",
+	})
+
+	cfg, err := config.Load()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"0123456789abcdef-aaa", "0987654321fedcba-bbb"}, cfg.APITokens)
+}
+
+// writeConfigFile is a YAML file the tests load through LoadWith.
+func writeConfigFile(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "sorovault.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+	return path
+}
+
+func TestLoadWithConfigFile(t *testing.T) {
+	// The environment is cleared to the test set; a file value must
+	// therefore surface everywhere the environment is silent.
+	setEnv(t, map[string]string{"DATABASE_URL": testDatabaseURL})
+
+	yaml := writeConfigFile(t, `# a reviewed settings file
+http_addr: ":9999"
+LOG_LEVEL: debug
+read_only: true
+rpc_timeout: 5s
+database_max_conns: 8
+max_concurrent_registrations: 2
+rate_limit_per_minute: 60
+refresh_webhook_url: "https://example.com/trapdoor"      # a comment
+`)
+
+	cfg, err := config.LoadWith(yaml)
+	require.NoError(t, err)
+	assert.Equal(t, ":9999", cfg.HTTPAddr)
+	assert.Equal(t, slog.LevelDebug, cfg.LogLevel)
+	assert.True(t, cfg.ReadOnly)
+	assert.Equal(t, 5*time.Second, cfg.RPCTimeout)
+	assert.Equal(t, int32(8), cfg.DatabaseMaxConns)
+	assert.Equal(t, 2, cfg.MaxConcurrentRegistrations)
+	assert.Equal(t, 60, cfg.RateLimitPerMinute)
+	assert.Equal(t, "https://example.com/trapdoor", cfg.RefreshWebhookURL)
+	assert.Equal(t, testDatabaseURL, cfg.DatabaseURL)
+
+	// The environment overrides the file, setting by setting; a name the
+	// file leaves alone keeps its default.
+	path := writeConfigFile(t, "http_addr: \":9999\"\nlog_level: warn\n")
+	cfg, err = config.LoadWith(path)
+	require.NoError(t, err)
+	assert.Equal(t, slog.LevelWarn, cfg.LogLevel, "a name the file sets alone still applies")
+}
+
+func TestConfigFileUnderEnvironment(t *testing.T) {
+	yaml := writeConfigFile(t, "http_addr: \":9999\"\nread_only: true\n")
+	setEnv(t, map[string]string{
+		"DATABASE_URL": testDatabaseURL,
+		"HTTP_ADDR":    ":7000",
+	})
+
+	// The environment has spoken for HTTP_ADDR; the file still speaks for
+	// every name the environment left alone.
+	cfg, err := config.LoadWith(yaml)
+	require.NoError(t, err)
+	assert.Equal(t, ":7000", cfg.HTTPAddr)
+	assert.True(t, cfg.ReadOnly)
+}
+
+func TestConfigFileMistakes(t *testing.T) {
+	tests := []struct {
+		name    string
+		file    string
+		wantErr string
+	}{
+		{
+			name:    "unknown key",
+			file:    "not_a_setting: true\n",
+			wantErr: "unknown key \"not_a_setting\"",
+		},
+		{
+			name:    "nested map under a known key",
+			file:    "http_addr:\n  nested: 1\n",
+			wantErr: "holds a nested map",
+		},
+		{
+			name:    "list value",
+			file:    "api_tokens:\n  - one\n  - two\n",
+			wantErr: "holds a list",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			path := writeConfigFile(t, tt.file)
+			_, err := config.LoadWith(path)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
 }
 
 func TestInvalidValues(t *testing.T) {

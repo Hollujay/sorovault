@@ -206,6 +206,34 @@ $ go run ./cmd/sorovault serve
 
 All configuration is environment variables. Only `DATABASE_URL` (or the path in `DATABASE_URL_FILE`, read from the filesystem) is required.
 
+### A YAML file as the base layer
+
+As the settings list grows, a reviewed file is easier to manage than a wall
+of exports. Pass `--config sorovault.yaml` (the `CONFIG_PATH` env var works
+too) and the file's values sit under the environment: the environment
+overrides the file setting by setting — an operator who exported a
+variable did so deliberately, usually in a container — and defaults still
+apply below both. The file's keys are these same env-var names,
+case-insensitively, so `http_addr:` and `HTTP_ADDR:` are the same key, and
+the types YAML gives the document (`read_only: true`, `rpc_timeout: 30s`)
+read as the settings they look like. A key that is not one of the names
+in the table above is an error naming the key, never a setting silently
+ignored, so a spelling slip cannot "work" by doing nothing.
+
+```yaml
+http_addr: ":8080"
+rpc_timeout: 30s
+refresh_interval: 6h
+read_only: true
+cors_origins: "https://dashboard.example.com"
+```
+
+Run `sorovault config show` to print the effective configuration — file,
+environment and defaults merged — with the secrets redacted: the
+connection string keeps its host and loses its password, tokens report
+only how many are configured, and the webhook secret is not even shaped
+back out of what it became. `--json` prints the same rows for scripts.
+
 | Variable | Default | Purpose |
 |---|---|---|
 | `DATABASE_URL` | — | Postgres connection string. **Required** (or set `DATABASE_URL_FILE` to read it from a file). |
@@ -229,6 +257,9 @@ All configuration is environment variables. Only `DATABASE_URL` (or the path in 
 | `RATE_LIMIT_BURST` | `10` | how many of those may arrive at once |
 | `TRUST_X_FORWARDED_FOR` | `false` | use the first `X-Forwarded-For` address as the client; only behind a trusted proxy |
 | `CORS_ORIGINS` | — | comma-separated exact browser origins, or `*` for read-only routes only |
+| `READ_ONLY` | `false` | refuse every write endpoint with 405; reads and automatic refreshes stay on (`--read-only` overrides) |
+| `API_TOKENS` | — | comma-separated bearer tokens the write endpoints accept; unset keeps writes public |
+| `CONFIG_PATH` | — | YAML config file whose values sit under the environment (`--config` names it explicitly) |
 
 `NETWORK_PASSPHRASE` is a guard, not a source of truth. SoroVault reads the real
 passphrase from the RPC endpoint and refuses to proceed if the two disagree, so
@@ -278,6 +309,36 @@ both are answered with a full sweep instead of a guess:
 
 In both, the position is moved to the newest ledger *before* the sweep starts,
 so an upgrade that lands during the sweep is read by the next poll.
+
+### Read-only mode
+
+Set `READ_ONLY=true` (or pass `--read-only`) and serve refuses every write
+endpoint with **405** — registrations, refreshes, source and deprecation
+edits, subscriptions. The routes stay mounted, so a writer is told the
+method is refused rather than sent a 404 that reads as an unknown resource;
+`GET /api/stats` reports the mode under `read_only`. Reads keep working,
+and the automatic refresher keeps the mirror current on its `REFRESH_INTERVAL`
+schedule, since a sweep is not subject to the HTTP restriction. The browse UI
+hides its register form. A common pairing: `REFRESH_INTERVAL=6h READ_ONLY=true`
+publishes a registry that stays current but takes nothing new from the public.
+
+### Restricting writes to token holders
+
+Set `API_TOKENS` to one or more comma-separated tokens and every write
+endpoint — registering (single and batch), cataloguing WASM, refreshes, source
+and deprecation edits, subscriptions — requires `Authorization: Bearer
+<token>`. Reads stay public: a registry's value is that anyone can browse it,
+and the mode still honors `READ_ONLY` if both are set (405 wins, since a
+read-only server refuses writes anyway). Each token must be at least 16
+characters (they are secrets: `openssl rand -hex 32` or equivalent) and no
+two may repeat; the server refuses to start otherwise. Configure several
+tokens, hand one to each tool that needs to write, and rotate by adding a
+new token before removing the old.
+
+Tokens are compared in constant time and never logged or echoed. Note the
+boundary honestly: the browse UI has no way to carry a bearer token, so its
+register form is disabled while tokens are configured — use the JSON API for
+writes. `GET /api/stats` stays public and is unaffected.
 
 ### Telling the world about an upgrade
 
@@ -561,6 +622,8 @@ through golang-migrate, and migrations are short-lived either way.
 | `PUT` | `/api/contracts/{id}/source` | attach a `source_url` and optional `source_commit` |
 | `POST` | `/api/contracts/{id}/verify` | verify the publisher with a claim signed by the deploying account |
 | `GET` | `/api/keys` | public keys that verify interface signatures |
+| `PUT` | `/api/contracts/{id}/deprecation` | mark the contract deprecated — optional `successor` (registered on the same network, not the contract itself) and `note` |
+| `DELETE` | `/api/contracts/{id}/deprecation` | lift the deprecation mark |
 | `GET` | `/api/contracts/{id}/functions/{fn}` | one function in detail |
 | `GET` | `/api/contracts/{id}/functions/{fn}/example.json` | one example argument list for the function — `?wasm_hash=` |
 | `GET` | `/api/contracts/{id}/events` | the contract's event definitions — `?network=`, `?wasm_hash=` |
@@ -626,6 +689,12 @@ contract in the registry. When a symbol matched, the listing says which:
 ```json
 { "contract_id": "CDZZ…4PAN", "network": "testnet", "matches": ["has_voted", "vote"] }
 ```
+
+A query that matches no name is also matched against the doc comments of the
+contract's functions and user-defined types (not events): there, every word
+of the query must appear as a word of some doc, so `?q=swap rewards` asks
+for both. Contracts whose names matched rank ahead of contracts only their
+documentation matched.
 
 A function removed by an upgrade stops matching; older versions stay
 retrievable by hash but are not searched.
@@ -734,6 +803,7 @@ sorovault keygen                    # make an attestation signing key
 sorovault migrate                   # apply schema migrations
 sorovault migrate status            # --json
 sorovault doctor                    # check a deployment's health
+sorovault config show               # print the effective configuration, secrets redacted (--json)
 ```
 
 `add` and `refresh` accept several contract IDs and report per-contract
@@ -1038,6 +1108,18 @@ allows as contract code.
 Attach a contract repository URL and an optional 40- or 64-character commit
 hash with `PUT /api/contracts/{id}/source`; the browse page displays the
 repository and commit with the interface.
+
+**Deprecation.** When a team migrates off a contract, the registry does not
+stop listing it — deployments keep pointing at it. Warn the people who find
+it: `PUT /api/contracts/{id}/deprecation` marks the contract deprecated,
+optionally naming a `successor` contract and a `note` on how to move over.
+The successor must be registered on the same network, and must be a contract
+other than the one being deprecated. The browse page shows a banner linking
+the successor, the contract responses carry `deprecated_since`, `successor`
+and `deprecation_note`, and `GET /api/contracts/{id}/client.ts` opens its
+generated code with a `@deprecated` note. A refresh never lifts the mark;
+`DELETE /api/contracts/{id}/deprecation` does.
+
 
 ## The ABI JSON
 

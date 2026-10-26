@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/soroworks/sorovault/internal/model"
 )
@@ -91,6 +92,21 @@ type Contract struct {
 	// decoded interface, such as "sep41".
 	Implements []string `json:"implements,omitempty"`
 
+	// DeprecatedSince is when the contract was marked deprecated: it has a
+	// replacement and users should stop building on it. It is nil while
+	// the contract is in active use, and survives refreshes — being live
+	// on the network says nothing about being the recommended one to use.
+	DeprecatedSince *time.Time `json:"deprecated_since,omitempty"`
+
+	// Successor is the contract ID that replaces a deprecated one. Empty
+	// means the tooling has retired the contract without agreeing where
+	// to go.
+	Successor string `json:"successor,omitempty"`
+
+	// DeprecationNote says how to move over, from the tooling that marked
+	// the contract deprecated.
+	DeprecationNote string `json:"deprecation_note,omitempty"`
+
 	// Matches lists the interface symbols — functions, types, events — that
 	// a search query matched. It is only set on search results, and is
 	// empty when the query matched the contract ID or name instead.
@@ -136,6 +152,88 @@ func matchSymbols(joined, query string) []string {
 		}
 	}
 	return out
+}
+
+// joinDocs renders an interface's doc comments for full-text search: the
+// docs of every function and user-defined type, newline-separated. Events
+// stay out — they are not the callable surface a search over "what does
+// this contract do" is about.
+func joinDocs(iface *model.Interface) string {
+	if iface == nil {
+		return ""
+	}
+	var docs []string
+	add := func(doc string) {
+		if doc != "" {
+			docs = append(docs, doc)
+		}
+	}
+	for _, fn := range iface.Functions {
+		add(fn.Doc)
+	}
+	for _, s := range iface.Types.Structs {
+		add(s.Doc)
+	}
+	for _, u := range iface.Types.Unions {
+		add(u.Doc)
+	}
+	for _, e := range iface.Types.Enums {
+		add(e.Doc)
+	}
+	for _, e := range iface.Types.ErrorEnums {
+		add(e.Doc)
+	}
+	return strings.Join(docs, symbolSeparator)
+}
+
+// docTerms splits a query into the terms full-text search matches against:
+// lowercased runs of letters and digits, so punctuation, emoji and other
+// noise drop out instead of being searched for literally. Splitting on
+// punctuation keeps "vault!" and "vault" finding the same docs, and it is
+// the part of the matcher both stores must apply the same way — the
+// Postgres tsquery is built out of exactly these words.
+func docTerms(text string) []string {
+	return strings.FieldsFunc(text, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+}
+
+// docMatchLower is what docTerms works on: Unicode case folding covers all
+// scripts, and lowercasing once here means the term and the doc text go
+// through the same fold.
+func docMatchLower(text string) []string {
+	return docTerms(strings.ToLower(text))
+}
+
+// matchDocs reports whether every term of query appears in the joined doc
+// blob, as a whole word or by common prefix. An empty blob or a query with
+// nothing word-like in it matches nothing.
+//
+// The prefix slack stands in for the case folding a tsvector applies: a
+// query "swap" has to find a doc about "swaps", and "SWAP" about either.
+// Both directions of the prefix test matter for that, and they stay in
+// step with the Postgres side, which the shared conformance suite pins:
+// it builds one lowercased prefix query per term out of the very words
+// docMatchLower yields, so a term landing in a doc ballparks its tsquery.
+func matchDocs(docs, query string) bool {
+	terms := docMatchLower(query)
+	if len(terms) == 0 {
+		return false
+	}
+	tokens := docMatchLower(docs)
+	for _, term := range terms {
+		found := false
+		for _, token := range tokens {
+			if strings.HasPrefix(token, term) || strings.HasPrefix(term, token) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 // hasFunction reports whether an interface declares a function with exactly
@@ -242,9 +340,11 @@ type SpecVersion struct {
 type ListFilter struct {
 	// Network restricts results to one network. Empty means all networks.
 	Network string
-	// Query is a case-insensitive substring match against contract ID,
-	// name, and the names of the functions, types and events in the
-	// contract's current interface. Empty matches everything.
+	// Query is a case-insensitive match against contract ID, name, and the
+	// names of the functions, types and events in the contract's current
+	// interface, and — ranked below those — a whole-word search over the
+	// doc comments of its functions and user-defined types, where every
+	// word of the query must be found. Empty matches everything.
 	Query string
 	// Functions restricts results to contracts whose current interface
 	// declares a function with exactly this name. Every name must match,
@@ -511,6 +611,16 @@ type Store interface {
 
 	// SetState stores a value under key, replacing any earlier one.
 	SetState(ctx context.Context, key, value string) error
+
+	// SetDeprecation marks an existing contract deprecated, with an
+	// optional successor contract ID and note. A successor the caller must
+	// verify — registered on the same network, a contract other than the
+	// one being deprecated — is the API's job, not the store's.
+	SetDeprecation(ctx context.Context, network, contractID, successor, note string) error
+
+	// ClearDeprecation lifts the mark, restoring the contract to active
+	// use.
+	ClearDeprecation(ctx context.Context, network, contractID string) error
 
 	// Delete removes a contract and every interface version stored for it.
 	// It returns ErrNotFound when the contract is not in the registry.

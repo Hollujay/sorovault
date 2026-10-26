@@ -12,6 +12,8 @@
   --accent-soft: #e6f1ed;
   --missing: #a33f52;
   --missing-soft: #fbecee;
+  --warning: #8a6d1f;
+  --warning-soft: #fbf4e2;
 
   /* Syntax highlighting. Every colour that carries text is a custom
      property, so the dark palette is a single override rather than a
@@ -34,6 +36,8 @@
     --accent-soft: #23302b;
     --missing: #f095a4;
     --missing-soft: #2f2224;
+    --warning: #e2c053;
+    --warning-soft: #2f2a1e;
 
     --syntax-parameter: #f1ad72;
     --syntax-constructor: #f095a4;
@@ -423,6 +427,16 @@ html.js .copy:focus-visible { outline: 2px solid var(--accent); outline-offset: 
   border-left-color: var(--missing);
   background: var(--missing-soft);
   color: var(--missing);
+}
+
+.notice.deprecated {
+  border-left-color: var(--warning);
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.notice.deprecated a.mono {
+  color: var(--warning);
 }
 
 .count-badge {
