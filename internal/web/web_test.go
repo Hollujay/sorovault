@@ -59,6 +59,30 @@ func newHarness(t *testing.T) *harness {
 	return &harness{server: srv, fake: fake, reg: reg, store: memory}
 }
 
+// newReadOnlyHarness is newHarness with the UI's read-only mode on, set
+// before the routes mount, the way serve wires READ_ONLY.
+func newReadOnlyHarness(t *testing.T) *harness {
+	t.Helper()
+
+	fake := stellartest.New()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	memory := store.NewMemory()
+	memory.SetClock(func() time.Time { return time.Unix(0, 0) })
+	reg := registry.New(fake, spec.XDRDecoder{}, memory, registry.Options{Logger: log})
+
+	ui, err := web.NewServer(reg, log)
+	require.NoError(t, err)
+	ui.SetReadOnly(true)
+
+	r := chi.NewRouter()
+	r.Mount("/", ui.Routes())
+
+	srv := httptest.NewServer(r)
+	t.Cleanup(srv.Close)
+
+	return &harness{server: srv, fake: fake, reg: reg, store: memory}
+}
+
 // response is the part of an *http.Response the tests inspect. The harness
 // consumes and closes the body before returning, so callers cannot leak it.
 type response struct {
@@ -151,6 +175,27 @@ func TestIndexEmpty(t *testing.T) {
 	assert.Contains(t, resp.Header.Get("Content-Type"), "text/html")
 	assert.Contains(t, body, "No contracts registered yet")
 	assert.Contains(t, body, "sorovault add")
+}
+
+// TestReadOnlyHidesTheRegisterForm proves a read-only mirror offers no
+// registration surface: the form is gone from the index, and a form POST
+// aimed at the missing endpoint is told the method is refused rather than
+// sent a 404 that reads as an unknown resource.
+func TestReadOnlyHidesTheRegisterForm(t *testing.T) {
+	t.Parallel()
+
+	h := newReadOnlyHarness(t)
+
+	resp, body := h.get(t, "/")
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, body, "No contracts registered yet",
+		"reads keep working in read-only mode")
+	assert.NotContains(t, body, "Register a contract")
+	assert.NotContains(t, body, `name="contract_id"`)
+
+	resp, body = h.postForm(t, "/contracts", url.Values{"contract_id": {idA}}, nil)
+	assert.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode)
+	assert.Contains(t, body, "read-only")
 }
 
 // TestIndexListsContracts proves a contract that has gone missing is

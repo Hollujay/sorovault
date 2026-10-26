@@ -48,6 +48,10 @@ type Server struct {
 	// sweep. It is nil when refresh is disabled, and GET /api/stats then
 	// omits the field.
 	lastSweep func() (refresher.SweepRecord, bool)
+
+	// readOnly marks a mirror that refuses writes. It is read once, when
+	// Routes mounts, so a server's mode is fixed at startup.
+	readOnly bool
 }
 
 // NewServer builds an API server over a registry.
@@ -56,6 +60,15 @@ func NewServer(reg *registry.Registry, log *slog.Logger) *Server {
 		log = slog.Default()
 	}
 	return &Server{reg: reg, log: log, cache: newInterfaceCache(interfaceCacheBytes)}
+}
+
+// SetReadOnly makes the server's write routes refuse with 405 instead of
+// running: reads stay public, and the automatic refresher outside the API
+// keeps the registry current. Call it before Routes mounts the routes,
+// where the choice between a real handler and a refusal is made once. It
+// mirrors SetLastSweep, which serve also sets at startup.
+func (s *Server) SetReadOnly(readOnly bool) {
+	s.readOnly = readOnly
 }
 
 // SetLastSweep makes GET /api/stats report the most recent automatic
@@ -71,17 +84,19 @@ func (s *Server) Routes() chi.Router {
 	r.Use(compressResponses("application/json", "text/plain"))
 
 	r.Get("/contracts", s.listContracts)
-	r.Post("/contracts", s.rateLimited(s.registerContract))
-	r.Post("/contracts:batch", s.batchRegisterContracts)
+	// POST /decode stays available in read-only mode: it answers with the
+	// decoded module and stores nothing, so it is a read with POST form.
 	r.Post("/decode", s.rateLimited(s.decodeWasm))
+	r.Post("/contracts", s.write(s.rateLimited(s.registerContract)))
+	r.Post("/contracts:batch", s.write(s.batchRegisterContracts))
 	r.Get("/wasm/{hash}", s.getWasmSpec)
-	r.Post("/wasm/{hash}", s.catalogWasm)
+	r.Post("/wasm/{hash}", s.write(s.catalogWasm))
 	r.Get("/wasm/{hash}/contracts", s.listWasmContracts)
 	r.Get("/contracts/{id}", s.getContract)
-	r.Put("/contracts/{id}/source", s.updateContractSource)
-	r.Put("/contracts/{id}/deprecation", s.setContractDeprecation)
-	r.Delete("/contracts/{id}/deprecation", s.clearContractDeprecation)
-	r.Post("/contracts/{id}/refresh", s.rateLimited(s.refreshContract))
+	r.Put("/contracts/{id}/source", s.write(s.updateContractSource))
+	r.Put("/contracts/{id}/deprecation", s.write(s.setContractDeprecation))
+	r.Delete("/contracts/{id}/deprecation", s.write(s.clearContractDeprecation))
+	r.Post("/contracts/{id}/refresh", s.write(s.rateLimited(s.refreshContract)))
 	r.Get("/contracts/{id}/versions", s.listVersions)
 	r.Get("/contracts/{id}/functions", s.listFunctions)
 	r.Get("/contracts/{id}/events", s.listEvents)
@@ -93,11 +108,26 @@ func (s *Server) Routes() chi.Router {
 	r.Get("/upgrades", s.listUpgrades)
 	r.Get("/upgrades.atom", s.upgradesAtom)
 	r.Get("/openapi.json", serveOpenAPI)
-	r.Post("/subscriptions", s.subscribeContract)
+	r.Post("/subscriptions", s.write(s.subscribeContract))
 	r.Get("/subscriptions", s.listSubscriptions)
-	r.Delete("/subscriptions/{secret}", s.unsubscribeContract)
+	r.Delete("/subscriptions/{secret}", s.write(s.unsubscribeContract))
 
 	return r
+}
+
+// write chooses at mount time what a write route does: its real handler in
+// normal operation, or a 405 refusal in read-only mode. The routes stay
+// mounted either way, so a writer hitting a read-only mirror is told the
+// method is refused rather than sent a 404 that reads as an unknown
+// resource.
+func (s *Server) write(h http.HandlerFunc) http.HandlerFunc {
+	if !s.readOnly {
+		return h
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		writeError(w, http.StatusMethodNotAllowed,
+			"this SoroVault is running read-only; write access is disabled")
+	}
 }
 
 var commitHash = regexp.MustCompile(`^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$`)
@@ -636,6 +666,7 @@ func (s *Server) getStats(w http.ResponseWriter, r *http.Request) {
 		Contracts:      stats.Contracts,
 		Versions:       stats.Versions,
 		LatestContract: stats.Latest,
+		ReadOnly:       s.readOnly,
 	}
 	if s.lastSweep != nil {
 		if record, ok := s.lastSweep(); ok {

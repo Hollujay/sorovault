@@ -700,9 +700,10 @@
           "contracts": { "type": "integer", "description": "Registered contracts across every network." },
           "versions": { "type": "integer", "description": "Stored interface versions across every network." },
           "latest_contract": { "$ref": "#/components/schemas/Contract", "description": "The most recently registered contract. Absent when the registry is empty." },
-          "last_refresh": { "$ref": "#/components/schemas/RefreshSummary", "description": "The most recent automatic refresh sweep. Absent when refresh is disabled or no sweep has finished yet." }
+          "last_refresh": { "$ref": "#/components/schemas/RefreshSummary", "description": "The most recent automatic refresh sweep. Absent when refresh is disabled or no sweep has finished yet." },
+          "read_only": { "type": "boolean", "description": "True when this server refuses writes: registrations, refreshes and source or deprecation edits answer 405, while reads and the automatic refresher continue." }
         },
-        "required": ["networks", "contracts", "versions"]
+        "required": ["networks", "contracts", "versions", "read_only"]
       },
       "RefreshSummary": {
         "type": "object",

@@ -225,6 +225,7 @@ All configuration is environment variables. Only `DATABASE_URL` (or the path in 
 | `RATE_LIMIT_BURST` | `10` | how many of those may arrive at once |
 | `TRUST_X_FORWARDED_FOR` | `false` | use the first `X-Forwarded-For` address as the client; only behind a trusted proxy |
 | `CORS_ORIGINS` | — | comma-separated exact browser origins, or `*` for read-only routes only |
+| `READ_ONLY` | `false` | refuse every write endpoint with 405; reads and automatic refreshes stay on (`--read-only` overrides) |
 
 `NETWORK_PASSPHRASE` is a guard, not a source of truth. SoroVault reads the real
 passphrase from the RPC endpoint and refuses to proceed if the two disagree, so
@@ -248,6 +249,18 @@ A contract that fails to refresh — expired, or an RPC error — is logged and
 skipped, and the sweep carries on. One sweep runs at startup and then one per
 interval; a sweep in progress at shutdown is cancelled before the database is
 closed.
+
+### Read-only mode
+
+Set `READ_ONLY=true` (or pass `--read-only`) and serve refuses every write
+endpoint with **405** — registrations, refreshes, source and deprecation
+edits, subscriptions. The routes stay mounted, so a writer is told the
+method is refused rather than sent a 404 that reads as an unknown resource;
+`GET /api/stats` reports the mode under `read_only`. Reads keep working,
+and the automatic refresher keeps the mirror current on its `REFRESH_INTERVAL`
+schedule, since a sweep is not subject to the HTTP restriction. The browse UI
+hides its register form. A common pairing: `REFRESH_INTERVAL=6h READ_ONLY=true`
+publishes a registry that stays current but takes nothing new from the public.
 
 ### Telling the world about an upgrade
 

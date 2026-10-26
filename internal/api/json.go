@@ -171,6 +171,8 @@ type statsResponse struct {
 	Versions       int                    `json:"versions"`
 	LatestContract *store.Contract        `json:"latest_contract,omitempty"`
 	LastRefresh    *refresher.SweepRecord `json:"last_refresh,omitempty"`
+	// ReadOnly is true when this server refuses writes.
+	ReadOnly bool `json:"read_only"`
 }
 
 type upgradeListResponse struct {

@@ -38,6 +38,10 @@ type Server struct {
 	log       *slog.Logger
 	templates *template.Template
 	publicURL string
+
+	// readOnly hides the register form and refuses the registration POST
+	// with a page at 405. Set once before Routes mounts.
+	readOnly bool
 }
 
 const contractsPerPage = 100
@@ -63,6 +67,13 @@ func (s *Server) SetPublicURL(base string) {
 	s.publicURL = strings.TrimRight(base, "/")
 }
 
+// SetReadOnly hides the browse UI's register form and refuses its POST
+// with a 405 page: a mirror exists to be browsed, not written to. Call it
+// before Routes, where the mode is fixed.
+func (s *Server) SetReadOnly(readOnly bool) {
+	s.readOnly = readOnly
+}
+
 func (s *Server) Routes() chi.Router {
 	r := chi.NewRouter()
 	r.Use(securityHeaders)
@@ -70,12 +81,28 @@ func (s *Server) Routes() chi.Router {
 	r.Get("/", s.index)
 	r.Get("/sitemap.xml", s.sitemap)
 	r.Get("/sitemap-{page}.xml", s.sitemapPage)
-	r.Post("/contracts", s.register)
+	r.Post("/contracts", s.write(s.register))
 	r.Get("/contracts/{id}", s.contract)
 	r.Get("/partials/contracts", s.contractRows)
 	r.Handle("/static/*", http.FileServer(http.FS(assets)))
 
 	return r
+}
+
+// write chooses at mount time what the registration POST does: the form's
+// handler normally, or a 405 page in read-only mode. The route stays
+// mounted either way, so a writer is told the method is refused rather
+// than sent a 404 that reads as an unknown resource.
+func (s *Server) write(h http.HandlerFunc) http.HandlerFunc {
+	if !s.readOnly {
+		return h
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		s.renderStatus(w, r, http.StatusMethodNotAllowed, "error.html", errorData{
+			Status:  http.StatusMethodNotAllowed,
+			Message: "This SoroVault is running read-only; registering is disabled.",
+		})
+	}
 }
 
 // securityHeaders hardens every UI response.
@@ -132,6 +159,7 @@ func (s *Server) indexPage(w http.ResponseWriter, r *http.Request, status int, d
 	data.Total = page.Total
 	data.Page = pageNumber
 	data.PageCount = pageCount(page.Total)
+	data.ReadOnly = s.readOnly
 
 	s.renderStatus(w, r, status, "index.html", data)
 }
@@ -434,6 +462,9 @@ type indexData struct {
 	// behind: the ID to correct, and why it was refused.
 	ContractID    string
 	RegisterError string
+
+	// ReadOnly hides the register form: a mirror refuses writes.
+	ReadOnly bool
 }
 
 // registerData is the registration form and the message under it.

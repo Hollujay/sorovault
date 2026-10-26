@@ -33,6 +33,7 @@ const requestTimeout = 60 * time.Second
 
 func newServeCmd() *cobra.Command {
 	var addr string
+	var readOnly bool
 
 	cmd := &cobra.Command{
 		Use:   "serve",
@@ -43,6 +44,13 @@ func newServeCmd() *cobra.Command {
 				listenAddr := a.cfg.HTTPAddr
 				if addr != "" {
 					listenAddr = addr
+				}
+				if readOnly {
+					// The flag wins over READ_ONLY, like --addr over
+					// HTTP_ADDR, because an operator who passes it on
+					// the command line means it.
+					a.cfg.ReadOnly = true
+					a.log.Info("read-only mode: write endpoints refuse with 405; refreshes still run")
 				}
 
 				refresh, stopRefresh, err := startRefresher(ctx, a)
@@ -64,6 +72,7 @@ func newServeCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&addr, "addr", "", "listen address (overrides HTTP_ADDR)")
+	cmd.Flags().BoolVar(&readOnly, "read-only", false, "refuse every write endpoint with 405; reads and automatic refreshes stay on (overrides READ_ONLY)")
 	return cmd
 }
 
@@ -164,6 +173,13 @@ func newRouter(reg *registry.Registry, log *slog.Logger, refresh *refresher.Refr
 			Burst:              cfg.RateLimitBurst,
 			TrustXForwardedFor: cfg.TrustXForwardedFor,
 		})
+		// Read-only mode is set once, before Routes mounts: the write
+		// routes then mount as refusals. The refresher outside the API
+		// keeps the mirror current.
+		if cfg.ReadOnly {
+			server.SetReadOnly(true)
+			ui.SetReadOnly(true)
+		}
 	}
 
 	r := chi.NewRouter()

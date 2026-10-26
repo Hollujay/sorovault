@@ -27,7 +27,7 @@ func setEnv(t *testing.T, vars map[string]string) {
 		"HTTP_ADDR", "LOG_LEVEL", "LOG_FORMAT", "RPC_TIMEOUT", "REFRESH_INTERVAL",
 		"MAX_CONCURRENT_REGISTRATIONS", "REFRESH_WEBHOOK_URL",
 		"REFRESH_WEBHOOK_SECRET", "CORS_ORIGINS", "RATE_LIMIT_PER_MINUTE",
-		"RATE_LIMIT_BURST", "TRUST_X_FORWARDED_FOR",
+		"RATE_LIMIT_BURST", "TRUST_X_FORWARDED_FOR", "READ_ONLY",
 		"DATABASE_MAX_CONNS", "DATABASE_MIN_CONNS",
 	} {
 		if v, ok := vars[key]; ok {
@@ -509,6 +509,27 @@ func TestRateLimit(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 5, cfg.RateLimitBurst)
 		assert.True(t, cfg.TrustXForwardedFor)
+	})
+
+	t.Run("read-only", func(t *testing.T) {
+		setEnv(t, map[string]string{
+			"DATABASE_URL": testDatabaseURL,
+			"READ_ONLY":    "true",
+		})
+
+		cfg, err := config.Load()
+		require.NoError(t, err)
+		assert.True(t, cfg.ReadOnly)
+	})
+
+	t.Run("invalid read-only boolean", func(t *testing.T) {
+		setEnv(t, map[string]string{
+			"DATABASE_URL": testDatabaseURL,
+			"READ_ONLY":    "sometimes",
+		})
+
+		_, err := config.Load()
+		require.Error(t, err)
 	})
 
 	t.Run("invalid burst and boolean", func(t *testing.T) {

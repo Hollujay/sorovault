@@ -103,6 +103,10 @@ type Config struct {
 	// X-Forwarded-For as the client. It must only be set behind a proxy the
 	// operator controls, because a client can otherwise forge its address.
 	TrustXForwardedFor bool
+	// ReadOnly makes serve refuse every write endpoint with 405, leaving
+	// reads and the automatic refresher untouched, so an operator can
+	// publish a registry for browsing without accepting registrations.
+	ReadOnly bool
 }
 
 // MinRefreshInterval is the shortest REFRESH_INTERVAL accepted. Below it a
@@ -208,6 +212,10 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	cfg.TrustXForwardedFor, err = envBool("TRUST_X_FORWARDED_FOR")
+	if err != nil {
+		return nil, err
+	}
+	cfg.ReadOnly, err = envBool("READ_ONLY")
 	if err != nil {
 		return nil, err
 	}

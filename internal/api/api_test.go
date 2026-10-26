@@ -60,6 +60,35 @@ func newHarnessWithStore(t *testing.T, fake *stellartest.Fake, db store.Store) *
 	return newHarnessWithOptions(t, fake, db, registry.Options{})
 }
 
+// newReadOnlyHarness is newHarness with serve's read-only mode on, set
+// before the routes mount, the way READ_ONLY configures it.
+func newReadOnlyHarness(t *testing.T) *harness {
+	t.Helper()
+
+	return newHarnessWithConfigure(t, func(s *api.Server) { s.SetReadOnly(true) })
+}
+
+// newHarnessWithConfigure builds the default harness with a tweak applied
+// to the API server before its routes mount.
+func newHarnessWithConfigure(t *testing.T, configure func(*api.Server)) *harness {
+	t.Helper()
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	fake := stellartest.New()
+	opts := registry.Options{Logger: log}
+	reg := registry.New(fake, spec.XDRDecoder{}, store.NewMemory(), opts)
+
+	server := api.NewServer(reg, log)
+	configure(server)
+	r := chi.NewRouter()
+	r.Mount("/api", server.Routes())
+
+	srv := httptest.NewServer(r)
+	t.Cleanup(srv.Close)
+
+	return &harness{server: srv, fake: fake, store: reg.Store(), api: server}
+}
+
 // newHarnessWithOptions builds a harness over the given network, store and
 // registry options.
 func newHarnessWithOptions(t *testing.T, fake *stellartest.Fake, db store.Store, opts registry.Options) *harness {
@@ -373,6 +402,53 @@ func TestContractDeprecation(t *testing.T) {
 	resp, raw = h.do(t, http.MethodGet, "/api/contracts/"+idA+"/client.ts", "")
 	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
 	assert.NotContains(t, string(raw), "@deprecated")
+}
+
+// TestReadOnlyMode pins what READ_ONLY changes: reads keep answering, the
+// stateless POST /api/decode stays available, and every route that writes
+// answers 405 with an explanation instead of a 404 that would read as an
+// unknown resource.
+func TestReadOnlyMode(t *testing.T) {
+	t.Parallel()
+
+	h := newReadOnlyHarness(t)
+
+	// Reads are untouched.
+	resp, raw := h.do(t, http.MethodGet, "/api/contracts", "")
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+
+	resp, raw = h.do(t, http.MethodGet, "/api/stats", "")
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+	assert.True(t, h.decode(t, raw)["read_only"].(bool))
+
+	// The decode form is stateless: it stores nothing, so read-only keeps
+	// it.
+	module := moduleWith(t, "proposed")
+	resp, raw = h.do(t, http.MethodPost, "/api/decode", string(module))
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+
+	// Every route that writes is refused where it mounts.
+	hash := strings.Repeat("ab", 32) // syntactically valid, never dereferenced
+	writes := []struct{ method, path string }{
+		{"POST", "/api/contracts"},
+		{"POST", "/api/contracts:batch"},
+		{"POST", "/api/wasm/" + hash},
+		{"PUT", "/api/contracts/" + idA + "/source"},
+		{"PUT", "/api/contracts/" + idA + "/deprecation"},
+		{"DELETE", "/api/contracts/" + idA + "/deprecation"},
+		{"POST", "/api/contracts/" + idA + "/refresh"},
+		{"POST", "/api/subscriptions"},
+		{"DELETE", "/api/subscriptions/somesecret"},
+	}
+	for _, tt := range writes {
+		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
+			t.Parallel()
+
+			resp, raw := h.do(t, tt.method, tt.path, "{}")
+			assert.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode, string(raw))
+			assert.Contains(t, h.decode(t, raw)["error"], "read-only")
+		})
+	}
 }
 
 func TestContractDeprecationRequests(t *testing.T) {
