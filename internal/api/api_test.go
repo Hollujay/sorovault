@@ -330,6 +330,90 @@ func TestUpdateContractSource(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode, string(raw))
 }
 
+func TestContractDeprecation(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.fake.Deploy(idA, moduleWith(t, "balance"))
+	h.fake.Deploy(idB, moduleWith(t, "balance"))
+	resp, _ := h.do(t, http.MethodPost, "/api/contracts", `{"contract_id":"`+idA+`"}`)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	resp, _ = h.do(t, http.MethodPost, "/api/contracts", `{"contract_id":"`+idB+`"}`)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+
+	// Mark A deprecated with B as the successor.
+	body := `{"successor":"` + idB + `","note":"Move voting to the replacement."}`
+	resp, raw := h.do(t, http.MethodPut, "/api/contracts/"+idA+"/deprecation", body)
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+	got := h.decode(t, raw)
+	assert.NotEmpty(t, got["deprecated_since"])
+	assert.Equal(t, idB, got["successor"])
+	assert.Equal(t, "Move voting to the replacement.", got["deprecation_note"])
+
+	// The listing carries the mark too.
+	resp, raw = h.do(t, http.MethodGet, "/api/contracts", "")
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+	assert.Contains(t, string(raw), "deprecated_since")
+
+	// The generated client warns its importer.
+	resp, raw = h.do(t, http.MethodGet, "/api/contracts/"+idA+"/client.ts", "")
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+	assert.Contains(t, string(raw), "// @deprecated since")
+	assert.Contains(t, string(raw), "Use contract "+idB+" instead.")
+
+	// Clearing restores the contract to active use.
+	resp, raw = h.do(t, http.MethodDelete, "/api/contracts/"+idA+"/deprecation", "")
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+	got = h.decode(t, raw)
+	assert.Empty(t, got["deprecated_since"])
+	assert.Empty(t, got["successor"])
+	assert.Empty(t, got["deprecation_note"])
+
+	// The generated client no longer warns.
+	resp, raw = h.do(t, http.MethodGet, "/api/contracts/"+idA+"/client.ts", "")
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+	assert.NotContains(t, string(raw), "@deprecated")
+}
+
+func TestContractDeprecationRequests(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.fake.Deploy(idA, moduleWith(t, "balance"))
+	resp, _ := h.do(t, http.MethodPost, "/api/contracts", `{"contract_id":"`+idA+`"}`)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+
+	bad := []struct {
+		name string
+		body string
+		path string
+		want int
+	}{
+		{"successor is the contract itself", `{"successor":"` + idA + `"}`, idA, http.StatusBadRequest},
+		{"successor is not registered", `{"successor":"` + idB + `"}`, idA, http.StatusBadRequest},
+		{"unknown contract", `{}`, idB, http.StatusNotFound},
+		{"bad json", `{`, idA, http.StatusBadRequest},
+		{"unknown field", `{"why":"because"}`, idA, http.StatusBadRequest},
+	}
+	for _, tt := range bad {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			resp, raw := h.do(t, http.MethodPut, "/api/contracts/"+tt.path+"/deprecation", tt.body)
+			assert.Equal(t, tt.want, resp.StatusCode, string(raw))
+			assert.NotEmpty(t, h.decode(t, raw)["error"])
+		})
+	}
+
+	// A bare object retires the contract without a destination.
+	resp, raw := h.do(t, http.MethodPut, "/api/contracts/"+idA+"/deprecation", `{}`)
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+	got := h.decode(t, raw)
+	assert.NotEmpty(t, got["deprecated_since"])
+	assert.Empty(t, got["successor"])
+	assert.Empty(t, got["deprecation_note"])
+}
+
 // TestRegisterExistingContractReturns200 distinguishes creating a record
 // from re-verifying one, which is what makes the endpoint safely retryable.
 func TestRegisterExistingContractReturns200(t *testing.T) {

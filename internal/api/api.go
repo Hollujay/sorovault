@@ -79,6 +79,8 @@ func (s *Server) Routes() chi.Router {
 	r.Get("/wasm/{hash}/contracts", s.listWasmContracts)
 	r.Get("/contracts/{id}", s.getContract)
 	r.Put("/contracts/{id}/source", s.updateContractSource)
+	r.Put("/contracts/{id}/deprecation", s.setContractDeprecation)
+	r.Delete("/contracts/{id}/deprecation", s.clearContractDeprecation)
 	r.Post("/contracts/{id}/refresh", s.rateLimited(s.refreshContract))
 	r.Get("/contracts/{id}/versions", s.listVersions)
 	r.Get("/contracts/{id}/functions", s.listFunctions)
@@ -346,6 +348,81 @@ func (s *Server) updateContractSource(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, contract)
 }
 
+// deprecationRequest is the body of PUT /contracts/{id}/deprecation. Both
+// fields are optional: a contract can be retired without a recorded
+// destination.
+type deprecationRequest struct {
+	Successor string `json:"successor,omitempty"`
+	Note      string `json:"note,omitempty"`
+}
+
+// setContractDeprecation serves PUT
+// /api/contracts/{id}/deprecation: mark a contract deprecated, with an
+// optional successor and note. It answers with the updated contract, the
+// same shape the source endpoint answers with.
+func (s *Server) setContractDeprecation(w http.ResponseWriter, r *http.Request) {
+	var req deprecationRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	network, err := s.network(r)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	contractID := chi.URLParam(r, "id")
+	successor := strings.TrimSpace(req.Successor)
+	if successor == contractID {
+		writeError(w, http.StatusBadRequest,
+			"the successor must be a contract other than the one being deprecated")
+		return
+	}
+	if successor != "" {
+		// The link the registry hands users has to serve them: the
+		// successor must be registered on the same network, or the
+		// deprecation would point somewhere this deployment knows
+		// nothing about.
+		if _, err := s.reg.Store().GetContract(r.Context(), network, successor); err != nil {
+			writeError(w, http.StatusBadRequest, "successor "+successor+" is not registered on "+network)
+			return
+		}
+	}
+	if err := s.reg.Store().SetDeprecation(r.Context(), network, contractID, successor,
+		strings.TrimSpace(req.Note)); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	contract, err := s.reg.Store().GetContract(r.Context(), network, contractID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, contract)
+}
+
+// clearContractDeprecation serves DELETE
+// /api/contracts/{id}/deprecation: lift the mark, restoring the contract
+// to active use.
+func (s *Server) clearContractDeprecation(w http.ResponseWriter, r *http.Request) {
+	network, err := s.network(r)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	contractID := chi.URLParam(r, "id")
+	if err := s.reg.Store().ClearDeprecation(r.Context(), network, contractID); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	contract, err := s.reg.Store().GetContract(r.Context(), network, contractID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, contract)
+}
+
 // openAPISpec describes every route above. TestOpenAPICoversEveryRoute
 // fails if a route is added without documenting it, or documented without
 // existing.
@@ -377,11 +454,24 @@ func (s *Server) getTypeScriptClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var deprecation *codegen.Deprecation
+	if contract, err := s.reg.Store().GetContract(r.Context(), network, contractID); err == nil && contract.DeprecatedSince != nil {
+		// The client is generated from the interface, but the mark is
+		// on the contract: a generated file exported today should warn
+		// its importer about a migration that happened last week.
+		deprecation = &codegen.Deprecation{
+			Since:     contract.DeprecatedSince.UTC().Format(time.RFC3339),
+			Successor: contract.Successor,
+			Note:      contract.DeprecationNote,
+		}
+	}
+
 	source, err := codegen.TypeScript(stored.Interface, codegen.Source{
-		ContractID: stored.ContractID,
-		Network:    stored.Network,
-		WasmHash:   stored.WasmHash,
-		WithZod:    r.URL.Query().Get("zod") != "",
+		ContractID:  stored.ContractID,
+		Network:     stored.Network,
+		WasmHash:    stored.WasmHash,
+		Deprecation: deprecation,
+		WithZod:     r.URL.Query().Get("zod") != "",
 	})
 	if err != nil {
 		// The interface decoded, but cannot be expressed as TypeScript —

@@ -191,6 +191,29 @@
         }
       }
     },
+    "/api/contracts/{id}/deprecation": {
+      "put": {
+        "summary": "Mark a contract deprecated",
+        "description": "Marks the contract deprecated, with an optional successor contract ID and note. The successor, when given, must be registered on the same network and must be a contract other than the one being deprecated. A refresh never lifts the mark; only DELETE does.",
+        "operationId": "setContractDeprecation",
+        "parameters": [{ "$ref": "#/components/parameters/id" }, { "$ref": "#/components/parameters/network" }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeprecationRequest" } } } },
+        "responses": {
+          "200": { "description": "The contract is deprecated; the response carries the mark.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Contract" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "delete": {
+        "summary": "Lift a contract's deprecation",
+        "operationId": "clearContractDeprecation",
+        "parameters": [{ "$ref": "#/components/parameters/id" }, { "$ref": "#/components/parameters/network" }],
+        "responses": {
+          "200": { "description": "The contract is back in active use; the response no longer carries a deprecation.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Contract" } } } },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
     "/api/wasm/{hash}": {
       "get": {
         "summary": "Get a catalogued uploaded WASM interface",
@@ -730,7 +753,10 @@
           "last_refreshed": { "type": "string", "format": "date-time" },
           "missing_since": { "type": "string", "format": "date-time", "description": "When a refresh last found the contract absent from the network. Absent while the contract is live." },
           "matches": { "type": "array", "items": { "type": "string" }, "description": "Interface symbols a search query matched. Only present on search results." },
-          "implements": { "type": "array", "items": { "type": "string" }, "description": "Standard interface IDs detected from the current contract interface." }
+          "implements": { "type": "array", "items": { "type": "string" }, "description": "Standard interface IDs detected from the current contract interface." },
+          "deprecated_since": { "type": "string", "format": "date-time", "description": "When the contract was marked deprecated. Absent while the contract is in active use." },
+          "successor": { "type": "string", "description": "The contract ID that replaces a deprecated one. Absent when no successor is recorded." },
+          "deprecation_note": { "type": "string", "description": "How to move over, from the tooling that marked the contract deprecated." }
         },
         "required": ["contract_id", "network", "current_wasm_hash", "first_seen", "last_refreshed"]
       },
@@ -789,6 +815,15 @@
           "source_commit": { "type": "string", "pattern": "^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$" }
         },
         "required": ["source_url"],
+        "additionalProperties": false
+      },
+      "DeprecationRequest": {
+        "type": "object",
+        "description": "Both fields are optional: a contract can be retired without a recorded destination.",
+        "properties": {
+          "successor": { "type": "string", "description": "The contract ID that replaces the deprecated one. Must be registered on the same network, and must be a contract other than the one being deprecated." },
+          "note": { "type": "string", "description": "How to move over, for the users the banner reaches." }
+        },
         "additionalProperties": false
       },
       "WasmSpec": {

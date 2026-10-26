@@ -401,6 +401,8 @@ through golang-migrate, and migrations are short-lived either way.
 | `GET` | `/api/wasm/{hash}/contracts` | every contract running a given WASM — `?network=`, `?ever=`, `?limit=`, `?offset=` |
 | `GET` | `/api/contracts/{id}` | the decoded ABI — `?network=`, `?wasm_hash=` |
 | `PUT` | `/api/contracts/{id}/source` | attach a `source_url` and optional `source_commit` |
+| `PUT` | `/api/contracts/{id}/deprecation` | mark the contract deprecated — optional `successor` (registered on the same network, not the contract itself) and `note` |
+| `DELETE` | `/api/contracts/{id}/deprecation` | lift the deprecation mark |
 | `GET` | `/api/contracts/{id}/functions/{fn}` | one function in detail |
 | `GET` | `/api/contracts/{id}/functions/{fn}/example.json` | one example argument list for the function — `?wasm_hash=` |
 | `GET` | `/api/contracts/{id}/events` | the contract's event definitions — `?network=`, `?wasm_hash=` |
@@ -881,6 +883,18 @@ allows as contract code.
 Attach a contract repository URL and an optional 40- or 64-character commit
 hash with `PUT /api/contracts/{id}/source`; the browse page displays the
 repository and commit with the interface.
+
+**Deprecation.** When a team migrates off a contract, the registry does not
+stop listing it — deployments keep pointing at it. Warn the people who find
+it: `PUT /api/contracts/{id}/deprecation` marks the contract deprecated,
+optionally naming a `successor` contract and a `note` on how to move over.
+The successor must be registered on the same network, and must be a contract
+other than the one being deprecated. The browse page shows a banner linking
+the successor, the contract responses carry `deprecated_since`, `successor`
+and `deprecation_note`, and `GET /api/contracts/{id}/client.ts` opens its
+generated code with a `@deprecated` note. A refresh never lifts the mark;
+`DELETE /api/contracts/{id}/deprecation` does.
+
 
 ## The ABI JSON
 

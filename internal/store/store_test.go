@@ -239,6 +239,94 @@ func runStoreSuite(t *testing.T, newStore factory) {
 		assert.Equal(t, "https://github.com/example/repo", got.SourceURL, "refresh must preserve source metadata")
 	})
 
+	t.Run("a deprecation mark survives refresh and clears cleanly", func(t *testing.T) {
+		s := newStore(t)
+		ctx := context.Background()
+
+		require.NoError(t, s.Save(ctx, contract(idA, "testnet", "hash1"), iface("balance")))
+		require.NoError(t, s.Save(ctx, contract(idB, "testnet", "hash2"), iface("balance")))
+
+		require.NoError(t, s.SetDeprecation(ctx, "testnet", idA, idB, "Move voting to the replacement."))
+		got, err := s.GetContract(ctx, "testnet", idA)
+		require.NoError(t, err)
+		require.NotNil(t, got.DeprecatedSince, "the mark carries the moment it was set")
+		assert.Equal(t, idB, got.Successor)
+		assert.Equal(t, "Move voting to the replacement.", got.DeprecationNote)
+
+		// A refresh does not revisit the mark: a contract being live on
+		// the network says nothing about whether it should still be used.
+		require.NoError(t, s.Save(ctx, contract(idA, "testnet", "hash3"), iface("balance-v2")))
+		got, err = s.GetContract(ctx, "testnet", idA)
+		require.NoError(t, err)
+		assert.NotNil(t, got.DeprecatedSince, "a refresh does not un-deprecate a contract")
+		assert.Equal(t, idB, got.Successor)
+
+		// Without a successor or note, only the timestamp is set.
+		require.NoError(t, s.Save(ctx, contract(idB, "testnet", "hash2"), iface("balance")))
+		require.NoError(t, s.ClearDeprecation(ctx, "testnet", idB))
+		require.NoError(t, s.SetDeprecation(ctx, "testnet", idB, "", ""))
+		got, err = s.GetContract(ctx, "testnet", idB)
+		require.NoError(t, err)
+		assert.NotNil(t, got.DeprecatedSince)
+		assert.Empty(t, got.Successor)
+		assert.Empty(t, got.DeprecationNote)
+
+		// Clearing drops the whole mark.
+		require.NoError(t, s.ClearDeprecation(ctx, "testnet", idA))
+		got, err = s.GetContract(ctx, "testnet", idA)
+		require.NoError(t, err)
+		assert.Nil(t, got.DeprecatedSince)
+		assert.Empty(t, got.Successor)
+		assert.Empty(t, got.DeprecationNote)
+
+		// Unknown contracts are not silently marked.
+		err = s.SetDeprecation(ctx, "testnet", "CDZZNOPE", "", "")
+		assert.ErrorIs(t, err, store.ErrNotFound)
+		err = s.ClearDeprecation(ctx, "testnet", "CDZZNOPE")
+		assert.ErrorIs(t, err, store.ErrNotFound)
+	})
+
+	t.Run("a deprecation mark rides listings, exports and imports", func(t *testing.T) {
+		s := newStore(t)
+		ctx := context.Background()
+
+		require.NoError(t, s.Save(ctx, contract(idA, "testnet", "hash1"), iface("balance")))
+		require.NoError(t, s.Save(ctx, contract(idB, "testnet", "hash2"), iface("balance")))
+		require.NoError(t, s.SetDeprecation(ctx, "testnet", idB, idA, "Move over."))
+
+		page, err := s.ListContracts(ctx, store.ListFilter{Network: "testnet"})
+		require.NoError(t, err)
+		require.Equal(t, 2, page.Total)
+		for _, c := range page.Contracts {
+			if c.ContractID != idB {
+				assert.Nil(t, c.DeprecatedSince, idA+" is still in active use")
+				continue
+			}
+			assert.NotNil(t, c.DeprecatedSince, "the listing carries the mark")
+			assert.Equal(t, idA, c.Successor)
+			assert.Equal(t, "Move over.", c.DeprecationNote)
+		}
+
+		before, err := s.Export(ctx)
+		require.NoError(t, err)
+		for _, cs := range before.Contracts {
+			if cs.Contract.ContractID == idB {
+				require.NotNil(t, cs.Contract.DeprecatedSince, "the snapshot carries the mark")
+				assert.Equal(t, idA, cs.Contract.Successor)
+				assert.Equal(t, "Move over.", cs.Contract.DeprecationNote)
+			}
+		}
+
+		// A fresh store restores the whole mark.
+		other := newStore(t)
+		require.NoError(t, other.Import(ctx, before, false))
+		got, err := other.GetContract(ctx, "testnet", idB)
+		require.NoError(t, err)
+		require.NotNil(t, got.DeprecatedSince)
+		assert.Equal(t, idA, got.Successor)
+		assert.Equal(t, "Move over.", got.DeprecationNote)
+	})
+
 	t.Run("missing rows report ErrNotFound", func(t *testing.T) {
 		s := newStore(t)
 		ctx := context.Background()

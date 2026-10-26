@@ -244,6 +244,12 @@ func (m *Memory) Save(ctx context.Context, c Contract, iface *model.Interface) e
 		if c.SourceCommit == "" {
 			c.SourceCommit = existing.SourceCommit
 		}
+		// A refresh does not revisit the deprecation mark: being live on
+		// the network again says nothing about being the recommended
+		// contract to use.
+		c.DeprecatedSince = existing.DeprecatedSince
+		c.Successor = existing.Successor
+		c.DeprecationNote = existing.DeprecationNote
 	} else {
 		c.FirstSeen = now
 	}
@@ -294,6 +300,47 @@ func (m *Memory) MarkMissing(ctx context.Context, network, contractID string, si
 		c.MissingSince = &stamp
 		m.contracts[k] = c
 	}
+	return nil
+}
+
+// SetDeprecation marks an existing contract deprecated, with an optional
+// successor contract ID and note. Verifying a successor — registered on
+// the same network, and a different contract — is the caller's job.
+func (m *Memory) SetDeprecation(ctx context.Context, network, contractID, successor, note string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	k := key(network, contractID)
+	c, ok := m.contracts[k]
+	if !ok {
+		return fmt.Errorf("%w: contract %s on %s", ErrNotFound, contractID, network)
+	}
+	now := m.now()
+	c.DeprecatedSince = &now
+	c.Successor = successor
+	c.DeprecationNote = note
+	m.contracts[k] = c
+	return nil
+}
+
+// ClearDeprecation lifts the mark, restoring the contract to active use.
+func (m *Memory) ClearDeprecation(ctx context.Context, network, contractID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	k := key(network, contractID)
+	c, ok := m.contracts[k]
+	if !ok {
+		return fmt.Errorf("%w: contract %s on %s", ErrNotFound, contractID, network)
+	}
+	c.DeprecatedSince = nil
+	c.Successor = ""
+	c.DeprecationNote = ""
+	m.contracts[k] = c
 	return nil
 }
 

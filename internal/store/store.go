@@ -77,6 +77,21 @@ type Contract struct {
 	// decoded interface, such as "sep41".
 	Implements []string `json:"implements,omitempty"`
 
+	// DeprecatedSince is when the contract was marked deprecated: it has a
+	// replacement and users should stop building on it. It is nil while
+	// the contract is in active use, and survives refreshes — being live
+	// on the network says nothing about being the recommended one to use.
+	DeprecatedSince *time.Time `json:"deprecated_since,omitempty"`
+
+	// Successor is the contract ID that replaces a deprecated one. Empty
+	// means the tooling has retired the contract without agreeing where
+	// to go.
+	Successor string `json:"successor,omitempty"`
+
+	// DeprecationNote says how to move over, from the tooling that marked
+	// the contract deprecated.
+	DeprecationNote string `json:"deprecation_note,omitempty"`
+
 	// Matches lists the interface symbols — functions, types, events — that
 	// a search query matched. It is only set on search results, and is
 	// empty when the query matched the contract ID or name instead.
@@ -552,6 +567,16 @@ type SubscriptionListItem struct {
 type Store interface {
 	// UpdateSource attaches repository metadata to an existing contract.
 	UpdateSource(ctx context.Context, network, contractID, sourceURL, sourceCommit string) error
+
+	// SetDeprecation marks an existing contract deprecated, with an
+	// optional successor contract ID and note. A successor the caller must
+	// verify — registered on the same network, a contract other than the
+	// one being deprecated — is the API's job, not the store's.
+	SetDeprecation(ctx context.Context, network, contractID, successor, note string) error
+
+	// ClearDeprecation lifts the mark, restoring the contract to active
+	// use.
+	ClearDeprecation(ctx context.Context, network, contractID string) error
 
 	// Delete removes a contract and every interface version stored for it.
 	// It returns ErrNotFound when the contract is not in the registry.
