@@ -315,7 +315,7 @@ func (p *Postgres) UpdateSource(ctx context.Context, network, contractID, source
 // SetOrigin records who created a contract and in which ledger.
 func (p *Postgres) SetOrigin(ctx context.Context, network, contractID, creator string, ledger uint32) error {
 	const q = `UPDATE contracts SET creator = $3, created_ledger = $4 WHERE network = $1 AND contract_id = $2`
-	tag, err := p.pool.Exec(ctx, q, network, contractID, creator, int32(ledger))
+	tag, err := p.pool.Exec(ctx, q, network, contractID, creator, int64(ledger))
 	if err != nil {
 		return fmt.Errorf("store: recording origin of %s: %w", contractID, err)
 	}
@@ -500,7 +500,7 @@ func (p *Postgres) Import(ctx context.Context, snapshot *Snapshot, merge bool) e
 			c.Network, c.ContractID, c.CurrentWasmHash, c.Name, c.SourceURL, c.SourceCommit,
 			c.FirstSeen, c.LastRefreshed, c.MissingSince,
 			c.Implements, c.DeprecatedSince, c.Successor, c.DeprecationNote,
-			c.Creator, int32(c.CreatedLedger), c.VerifiedBy, c.VerifiedAt, c.VerifiedWasmHash); err != nil {
+			c.Creator, int64(c.CreatedLedger), c.VerifiedBy, c.VerifiedAt, c.VerifiedWasmHash); err != nil {
 			return fmt.Errorf("store: importing contract %s: %w", c.ContractID, err)
 		}
 
