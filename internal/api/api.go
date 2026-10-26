@@ -2,13 +2,16 @@
 //
 // The API is read-mostly: the only write is registering or refreshing a
 // contract, which does not change the contract itself, only what SoroVault
-// knows about it. There is no authentication — deployment is expected to put
-// the service behind whatever the operator already uses.
+// knows about it. There is no authentication by default — deployment is
+// expected to put the service behind whatever the operator already uses —
+// and when API tokens are configured, write endpoints require a bearer
+// credential while reads stay public.
 package api
 
 import (
 	"bytes"
 	"crypto/sha256"
+	"crypto/subtle"
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
@@ -52,6 +55,11 @@ type Server struct {
 	// readOnly marks a mirror that refuses writes. It is read once, when
 	// Routes mounts, so a server's mode is fixed at startup.
 	readOnly bool
+
+	// tokens are the bearer credentials writes must present. Empty keeps
+	// every write public, as the API has always behaved; they are held
+	// here and compared in constant time, and never logged or echoed.
+	tokens []string
 }
 
 // NewServer builds an API server over a registry.
@@ -69,6 +77,15 @@ func NewServer(reg *registry.Registry, log *slog.Logger) *Server {
 // mirrors SetLastSweep, which serve also sets at startup.
 func (s *Server) SetReadOnly(readOnly bool) {
 	s.readOnly = readOnly
+}
+
+// SetAPITokens requires write routes to present one of the given bearer
+// tokens. Call it before Routes mounts, where the gate is built once.
+// An empty list keeps every write public; values are compared in constant
+// time, and nothing logs or echoes them, matching how the config keeps
+// them out of trouble.
+func (s *Server) SetAPITokens(tokens []string) {
+	s.tokens = tokens
 }
 
 // SetLastSweep makes GET /api/stats report the most recent automatic
@@ -121,13 +138,53 @@ func (s *Server) Routes() chi.Router {
 // method is refused rather than sent a 404 that reads as an unknown
 // resource.
 func (s *Server) write(h http.HandlerFunc) http.HandlerFunc {
-	if !s.readOnly {
-		return h
+	if s.readOnly {
+		return func(w http.ResponseWriter, r *http.Request) {
+			writeError(w, http.StatusMethodNotAllowed,
+				"this SoroVault is running read-only; write access is disabled")
+		}
 	}
+	if len(s.tokens) > 0 {
+		return s.requireBearer(h)
+	}
+	return h
+}
+
+// requireBearer serves the wrapped route only when the request presents
+// one of the configured tokens as `Authorization: Bearer <token>`.
+//
+// Malformed credentials and wrong tokens get different status codes — a
+// malformed header is a client mistake worth teaching, while a valid
+// header with the wrong secret is an access attempt and only ever earns
+// "unauthorized", which carries the presented secret nowhere.
+func (s *Server) requireBearer(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		writeError(w, http.StatusMethodNotAllowed,
-			"this SoroVault is running read-only; write access is disabled")
+		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if !ok {
+			writeError(w, http.StatusBadRequest,
+				"Authorization header must be Bearer authentication")
+			return
+		}
+		if !s.tokenMatches(token) {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="sorovault"`)
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		next(w, r)
 	}
+}
+
+// tokenMatches compares a presented secret against every configured token
+// regardless of any match: the loop runs whole, so success is not told
+// apart from failure by how early it stopped. Every comparison is
+// constant time; lengths differ, subtleties and all, so timing leaks
+// nothing more than the response does.
+func (s *Server) tokenMatches(presented string) bool {
+	matches := 0
+	for _, token := range s.tokens {
+		matches |= subtle.ConstantTimeCompare([]byte(presented), []byte(token))
+	}
+	return matches == 1
 }
 
 var commitHash = regexp.MustCompile(`^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$`)

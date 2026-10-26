@@ -180,6 +180,13 @@ func newRouter(reg *registry.Registry, log *slog.Logger, refresh *refresher.Refr
 			server.SetReadOnly(true)
 			ui.SetReadOnly(true)
 		}
+		// When any API token is configured, writes need a bearer
+		// credential; reads stay public. The browse UI then offers no
+		// working register form: a browser cannot carry the secret.
+		if len(cfg.APITokens) > 0 {
+			server.SetAPITokens(cfg.APITokens)
+			ui.SetWriteAuthRequired(true)
+		}
 	}
 
 	r := chi.NewRouter()

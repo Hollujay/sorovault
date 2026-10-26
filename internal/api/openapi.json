@@ -66,6 +66,7 @@
         "summary": "Register a contract",
         "description": "Fetches the contract's WASM, decodes its interface and stores it. Idempotent: registering a known contract re-verifies it, and records a new interface version if it was upgraded.",
         "operationId": "registerContract",
+        "security": [{ "bearerToken": [] }],
         "requestBody": {
           "required": true,
           "content": { "application/json": { "schema": {
@@ -91,6 +92,7 @@
         "summary": "Register several contracts in one request",
         "description": "Registers up to 20 contracts, one after another, and reports one result per contract. The contracts are processed sequentially, so the batch draws on the registry's concurrency budget once per contract rather than all at once, and one failure does not stop the rest: every contract gets a result of its own, with the status code it would have had on its own request.",
         "operationId": "batchRegisterContracts",
+        "security": [{ "bearerToken": [] }],
         "requestBody": {
           "required": true,
           "content": { "application/json": { "schema": {
@@ -111,6 +113,7 @@
         "summary": "Register a webhook URL for a set of contracts",
         "description": "Registers a webhook URL that will be notified when any of the specified contracts' interfaces change. Returns a secret used to sign deliveries.",
         "operationId": "subscribeContract",
+        "security": [{ "bearerToken": [] }],
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SubscribeRequest" } } } },
         "responses": {
           "200": { "description": "Subscription registered.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SubscribeResponse" } } } },
@@ -132,6 +135,7 @@
         "description": "Removes a webhook subscription by its secret.",
         "parameters": [{ "name": "secret", "in": "path", "required": true, "description": "The secret returned when the subscription was created.", "schema": { "type": "string" } }],
         "operationId": "unsubscribeContract",
+        "security": [{ "bearerToken": [] }],
         "responses": {
           "200": { "description": "Subscription removed.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SubscribeResponse" } } } },
           "400": { "$ref": "#/components/responses/BadRequest" }
@@ -182,6 +186,7 @@
       "put": {
         "summary": "Attach source repository metadata",
         "operationId": "updateContractSource",
+        "security": [{ "bearerToken": [] }],
         "parameters": [{ "$ref": "#/components/parameters/id" }, { "$ref": "#/components/parameters/network" }],
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SourceRequest" } } } },
         "responses": {
@@ -196,6 +201,7 @@
         "summary": "Mark a contract deprecated",
         "description": "Marks the contract deprecated, with an optional successor contract ID and note. The successor, when given, must be registered on the same network and must be a contract other than the one being deprecated. A refresh never lifts the mark; only DELETE does.",
         "operationId": "setContractDeprecation",
+        "security": [{ "bearerToken": [] }],
         "parameters": [{ "$ref": "#/components/parameters/id" }, { "$ref": "#/components/parameters/network" }],
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeprecationRequest" } } } },
         "responses": {
@@ -207,6 +213,7 @@
       "delete": {
         "summary": "Lift a contract's deprecation",
         "operationId": "clearContractDeprecation",
+        "security": [{ "bearerToken": [] }],
         "parameters": [{ "$ref": "#/components/parameters/id" }, { "$ref": "#/components/parameters/network" }],
         "responses": {
           "200": { "description": "The contract is back in active use; the response no longer carries a deprecation.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Contract" } } } },
@@ -228,6 +235,7 @@
         "summary": "Catalog uploaded code by WASM hash",
         "description": "Fetches and decodes uploaded code even when no deployed contract currently references it.",
         "operationId": "catalogWasm",
+        "security": [{ "bearerToken": [] }],
         "parameters": [{ "$ref": "#/components/parameters/hash" }],
         "responses": {
           "201": { "description": "Newly catalogued.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WasmCatalogResult" } } } },
@@ -353,6 +361,7 @@
       "post": {
         "summary": "Re-check a registered contract against the network",
         "operationId": "refreshContract",
+        "security": [{ "bearerToken": [] }],
         "parameters": [{ "$ref": "#/components/parameters/id" }],
         "responses": {
           "200": { "description": "Refreshed. `changed` is true when a new interface version was recorded.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RegisterResult" }, "examples": { "unchanged": { "$ref": "#/components/examples/ExistingRegisterResult" } } } } },
@@ -432,6 +441,13 @@
     }
   },
   "components": {
+    "securitySchemes": {
+      "bearerToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "One of the bearer tokens the operator configured. Required on write operations only: reads are public."
+      }
+    },
     "parameters": {
       "id": { "name": "id", "in": "path", "required": true, "schema": { "$ref": "#/components/schemas/ContractID" } },
       "hash": { "name": "hash", "in": "path", "required": true, "schema": { "$ref": "#/components/schemas/WasmHash" } },

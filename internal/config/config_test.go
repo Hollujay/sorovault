@@ -28,6 +28,7 @@ func setEnv(t *testing.T, vars map[string]string) {
 		"MAX_CONCURRENT_REGISTRATIONS", "REFRESH_WEBHOOK_URL",
 		"REFRESH_WEBHOOK_SECRET", "CORS_ORIGINS", "RATE_LIMIT_PER_MINUTE",
 		"RATE_LIMIT_BURST", "TRUST_X_FORWARDED_FOR", "READ_ONLY",
+		"API_TOKENS",
 		"DATABASE_MAX_CONNS", "DATABASE_MIN_CONNS",
 	} {
 		if v, ok := vars[key]; ok {
@@ -548,6 +549,52 @@ func TestRateLimit(t *testing.T) {
 			require.Error(t, err)
 		}
 	})
+}
+
+func TestParseAPITokens(t *testing.T) {
+	t.Parallel()
+
+	t.Run("several tokens for rotation", func(t *testing.T) {
+		tokens, err := config.ParseAPITokens("0123456789abcdef-aaa , 0987654321fedcba-bbb ,0123456789abcdef-ccc")
+		require.NoError(t, err)
+		assert.Equal(t, []string{
+			"0123456789abcdef-aaa", "0987654321fedcba-bbb", "0123456789abcdef-ccc",
+		}, tokens, "entries are trimmed but a token's own bytes are kept")
+	})
+
+	t.Run("empty keeps writes public", func(t *testing.T) {
+		for _, raw := range []string{"", "  "} {
+			tokens, err := config.ParseAPITokens(raw)
+			require.NoError(t, err)
+			assert.Empty(t, tokens)
+		}
+	})
+
+	t.Run("mistakes refuse to boot", func(t *testing.T) {
+		for name, raw := range map[string]string{
+			"too short":  "short",
+			"duplicate":  "0123456789abcdef-aaa, 0123456789abcdef-aaa",
+			"a space in": "0123456789abcdef-aaa bbb",
+		} {
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+
+				_, err := config.ParseAPITokens(raw)
+				require.Error(t, err)
+			})
+		}
+	})
+}
+
+func TestLoadAPITokens(t *testing.T) {
+	setEnv(t, map[string]string{
+		"DATABASE_URL": testDatabaseURL,
+		"API_TOKENS":   "0123456789abcdef-aaa,0987654321fedcba-bbb",
+	})
+
+	cfg, err := config.Load()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"0123456789abcdef-aaa", "0987654321fedcba-bbb"}, cfg.APITokens)
 }
 
 func TestInvalidValues(t *testing.T) {

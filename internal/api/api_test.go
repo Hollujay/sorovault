@@ -160,6 +160,32 @@ func (h *harness) do(t *testing.T, method, path, body string) (*response, []byte
 	return &response{StatusCode: resp.StatusCode, Header: resp.Header}, raw
 }
 
+// doWithHeader is do with one extra request header, for tests that need
+// credentials beyond JSON bodies.
+func (h *harness) doWithHeader(t *testing.T, method, path, body, key, value string) (*response, []byte) {
+	t.Helper()
+
+	var reader io.Reader
+	if body != "" {
+		reader = strings.NewReader(body)
+	}
+
+	req, err := http.NewRequestWithContext(context.Background(), method, h.server.URL+path, reader)
+	require.NoError(t, err)
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set(key, value)
+
+	resp, err := h.server.Client().Do(req)
+	require.NoError(t, err)
+
+	raw, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	return &response{StatusCode: resp.StatusCode, Header: resp.Header}, raw
+}
+
 func (h *harness) decode(t *testing.T, raw []byte) map[string]any {
 	t.Helper()
 
@@ -449,6 +475,78 @@ func TestReadOnlyMode(t *testing.T) {
 			assert.Contains(t, h.decode(t, raw)["error"], "read-only")
 		})
 	}
+}
+
+// TestWriteAuth pins what API_TOKENS changes: reads stay public, writes
+// need a bearer credential, a wrong secret only ever earns "unauthorized"
+// and never echoes the presented value, and every token in the configured
+// set works — which is what makes rotation a configuration change.
+func TestWriteAuth(t *testing.T) {
+	t.Parallel()
+
+	tokens := []string{
+		"0123456789abcdef-dashboards",
+		"0987654321fedcba-ci-runner",
+	}
+	h := newHarnessWithConfigure(t, func(s *api.Server) { s.SetAPITokens(tokens) })
+
+	// Reads are public, including the stateless decode form.
+	resp, raw := h.do(t, http.MethodGet, "/api/contracts", "")
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+	resp, raw = h.do(t, http.MethodPost, "/api/decode", string(moduleWith(t, "proposed")))
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+
+	// No credential: teach the client the header shape.
+	resp, raw = h.do(t, http.MethodPost, "/api/contracts", `{"contract_id":"nope"}`)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode, string(raw))
+	assert.Contains(t, h.decode(t, raw)["error"], "Bearer")
+
+	// A well-formed credential with the wrong secret is an access attempt
+	// (401), while a header without a Bearer prefix is a client mistake
+	// worth teaching (400). Neither carries the presented secret back.
+	wrong := []struct {
+		name, value string
+		wantStatus  int
+	}{
+		{"wrong token", "Bearer not-the-configured-secret-ooo", http.StatusUnauthorized},
+		{"lower-case prefix is not Bearer", "bearer " + tokens[0], http.StatusBadRequest},
+	}
+	for _, tt := range wrong {
+		resp, raw = h.doWithHeader(t, http.MethodPost, "/api/contracts",
+			`{"contract_id":"nope"}`, "Authorization", tt.value)
+		require.Equal(t, tt.wantStatus, resp.StatusCode, tt.name)
+		if tt.wantStatus == http.StatusUnauthorized {
+			assert.Equal(t, `Bearer realm="sorovault"`, resp.Header.Get("WWW-Authenticate"), tt.name)
+		}
+		assert.NotContains(t, string(raw), tt.value,
+			"the response never carries the presented secret back")
+	}
+
+	// Every configured token opens the writes — that is the rotation.
+	h.fake.Deploy(idA, moduleWith(t, "balance"))
+	resp, raw = h.doWithHeader(t, http.MethodPost, "/api/contracts",
+		`{"contract_id":"`+idA+`"}`, "Authorization", "Bearer "+tokens[0])
+	require.Equal(t, http.StatusCreated, resp.StatusCode, string(raw))
+
+	resp, raw = h.doWithHeader(t, http.MethodPut, "/api/contracts/"+idA+"/source",
+		`{"source_url":"https://github.com/example/repo"}`, "Authorization", "Bearer "+tokens[1])
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+}
+
+// TestWriteAuthReadOnlyWins pins the composition: a server both read-only
+// and token-gated answers writes with 405, not 401, since no credential
+// can make a refused route run. Reads stay public either way.
+func TestWriteAuthReadOnlyWins(t *testing.T) {
+	t.Parallel()
+
+	h := newHarnessWithConfigure(t, func(s *api.Server) {
+		s.SetReadOnly(true)
+		s.SetAPITokens([]string{"0123456789abcdef-dashboards"})
+	})
+
+	resp, raw := h.do(t, http.MethodPost, "/api/contracts", "{}")
+	assert.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode, string(raw))
+	assert.Contains(t, h.decode(t, raw)["error"], "read-only")
 }
 
 func TestContractDeprecationRequests(t *testing.T) {

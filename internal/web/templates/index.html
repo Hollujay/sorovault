@@ -32,7 +32,11 @@
 
 {{template "contract_rows.html" .}}
 
-{{if not .ReadOnly}}
+{{if .ReadOnly}}
+<p class="notice">This registry is read-only; registering is disabled.</p>
+{{else if .WriteAuthRequired}}
+<p class="notice">This registry requires an API token to register contracts; the browser form is disabled. Use the JSON API with <code>Authorization: Bearer &lt;token&gt;</code>.</p>
+{{else}}
 <section>
   <h2>Register a contract</h2>
   <p class="dim">Fetch a contract's interface from the network and add it to the registry.</p>

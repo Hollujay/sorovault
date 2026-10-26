@@ -226,6 +226,7 @@ All configuration is environment variables. Only `DATABASE_URL` (or the path in 
 | `TRUST_X_FORWARDED_FOR` | `false` | use the first `X-Forwarded-For` address as the client; only behind a trusted proxy |
 | `CORS_ORIGINS` | — | comma-separated exact browser origins, or `*` for read-only routes only |
 | `READ_ONLY` | `false` | refuse every write endpoint with 405; reads and automatic refreshes stay on (`--read-only` overrides) |
+| `API_TOKENS` | — | comma-separated bearer tokens the write endpoints accept; unset keeps writes public |
 
 `NETWORK_PASSPHRASE` is a guard, not a source of truth. SoroVault reads the real
 passphrase from the RPC endpoint and refuses to proceed if the two disagree, so
@@ -261,6 +262,24 @@ and the automatic refresher keeps the mirror current on its `REFRESH_INTERVAL`
 schedule, since a sweep is not subject to the HTTP restriction. The browse UI
 hides its register form. A common pairing: `REFRESH_INTERVAL=6h READ_ONLY=true`
 publishes a registry that stays current but takes nothing new from the public.
+
+### Restricting writes to token holders
+
+Set `API_TOKENS` to one or more comma-separated tokens and every write
+endpoint — registering (single and batch), cataloguing WASM, refreshes, source
+and deprecation edits, subscriptions — requires `Authorization: Bearer
+<token>`. Reads stay public: a registry's value is that anyone can browse it,
+and the mode still honors `READ_ONLY` if both are set (405 wins, since a
+read-only server refuses writes anyway). Each token must be at least 16
+characters (they are secrets: `openssl rand -hex 32` or equivalent) and no
+two may repeat; the server refuses to start otherwise. Configure several
+tokens, hand one to each tool that needs to write, and rotate by adding a
+new token before removing the old.
+
+Tokens are compared in constant time and never logged or echoed. Note the
+boundary honestly: the browse UI has no way to carry a bearer token, so its
+register form is disabled while tokens are configured — use the JSON API for
+writes. `GET /api/stats` stays public and is unaffected.
 
 ### Telling the world about an upgrade
 

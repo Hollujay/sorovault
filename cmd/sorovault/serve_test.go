@@ -149,6 +149,45 @@ func TestReadOnlyWiring(t *testing.T) {
 	assert.Contains(t, string(raw), "read-only")
 }
 
+// TestWriteAuthWiring proves serve's API_TOKENS wiring reaches the mounted
+// router: with tokens configured, the API's writes need a bearer
+// credential while reads stay public.
+func TestWriteAuthWiring(t *testing.T) {
+	t.Parallel()
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	reg := registry.New(stellartest.New(), spec.XDRDecoder{}, store.NewMemory(), registry.Options{Logger: log})
+
+	handler, err := newRouter(reg, log, nil, &config.Config{APITokens: []string{"0123456789abcdef-wired"}})
+	require.NoError(t, err)
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+
+	resp, err := srv.Client().Get(srv.URL + "/api/contracts")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = resp.Body.Close() })
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "reads stay public under token auth")
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/contracts", bytes.NewReader([]byte(`{}`)))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = srv.Client().Do(req)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = resp.Body.Close() })
+	raw, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, string(raw))
+
+	req.Header.Set("Authorization", "Bearer 0123456789abcdef-wired")
+	resp, err = srv.Client().Do(req)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = resp.Body.Close() })
+	raw, err = io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, string(raw),
+		"the credential opens the route; {} is still an empty contract ID")
+}
+
 func TestPrintFunction(t *testing.T) {
 	t.Parallel()
 

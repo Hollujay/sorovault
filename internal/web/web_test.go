@@ -64,6 +64,22 @@ func newHarness(t *testing.T) *harness {
 func newReadOnlyHarness(t *testing.T) *harness {
 	t.Helper()
 
+	return newHarnessWithConfigure(t, func(ui *web.Server) { ui.SetReadOnly(true) })
+}
+
+// newWriteAuthRequiredHarness is newHarness with the UI's token-required
+// mode on, set before the routes mount, the way serve wires API_TOKENS.
+func newWriteAuthRequiredHarness(t *testing.T) *harness {
+	t.Helper()
+
+	return newHarnessWithConfigure(t, func(ui *web.Server) { ui.SetWriteAuthRequired(true) })
+}
+
+// newHarnessWithConfigure builds the default harness with a tweak applied
+// to the UI server before its routes mount.
+func newHarnessWithConfigure(t *testing.T, configure func(*web.Server)) *harness {
+	t.Helper()
+
 	fake := stellartest.New()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	memory := store.NewMemory()
@@ -72,7 +88,7 @@ func newReadOnlyHarness(t *testing.T) *harness {
 
 	ui, err := web.NewServer(reg, log)
 	require.NoError(t, err)
-	ui.SetReadOnly(true)
+	configure(ui)
 
 	r := chi.NewRouter()
 	r.Mount("/", ui.Routes())
@@ -196,6 +212,25 @@ func TestReadOnlyHidesTheRegisterForm(t *testing.T) {
 	resp, body = h.postForm(t, "/contracts", url.Values{"contract_id": {idA}}, nil)
 	assert.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode)
 	assert.Contains(t, body, "read-only")
+}
+
+// TestWriteAuthHidesTheRegisterForm proves a token-gated registry offers
+// no working browser form: a plain HTML form cannot carry the secret a
+// write would need, so the form goes away and the POST route explains
+// what the form would have demanded.
+func TestWriteAuthHidesTheRegisterForm(t *testing.T) {
+	t.Parallel()
+
+	h := newWriteAuthRequiredHarness(t)
+
+	resp, body := h.get(t, "/")
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.NotContains(t, body, `name="contract_id"`)
+	assert.Contains(t, body, "API token")
+
+	resp, body = h.postForm(t, "/contracts", url.Values{"contract_id": {idA}}, nil)
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	assert.Contains(t, body, "API token")
 }
 
 // TestIndexListsContracts proves a contract that has gone missing is

@@ -107,6 +107,54 @@ type Config struct {
 	// reads and the automatic refresher untouched, so an operator can
 	// publish a registry for browsing without accepting registrations.
 	ReadOnly bool
+	// APITokens are the bearer credentials the write endpoints accept.
+	// Put in rotation by configuring several. Empty keeps every write
+	// public, as the API has always behaved; when any are set, a write
+	// must present one as `Authorization: Bearer <token>`.
+	//
+	// Secrets live here in memory only: nothing logs, serialises or
+	// echoes the configured values.
+	APITokens []string
+}
+
+// MinAPITokenLength is the shortest API token the write auth accepts.
+//
+// The limit is a floor, not advice: a token short enough to guess is not
+// meaningfully different from no token at all. Generate with something
+// like `openssl rand -hex 32`.
+const MinAPITokenLength = 16
+
+// ParseAPITokens decodes an API_TOKENS value: comma-separated bearer
+// tokens, whitespace around an entry ignored. Whitespace inside an entry
+// is kept — it is a secret's bytes, and trimming secrets is how mismatches
+// happen — so an entry with any embedded space is refused as a mistake.
+// An empty or absent value yields no tokens, which keeps every write
+// public.
+func ParseAPITokens(raw string) ([]string, error) {
+	tokens := []string{}
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		switch {
+		case entry == "":
+			continue
+		case strings.ContainsAny(entry, " \t\n"):
+			return nil, fmt.Errorf("config: API_TOKENS contains whitespace; each token must be one string")
+		}
+		tokens = append(tokens, entry)
+	}
+
+	names := map[string]bool{}
+	for _, token := range tokens {
+		if len(token) < MinAPITokenLength {
+			return nil, fmt.Errorf("config: API_TOKENS has a %d character token; use at least %d (e.g. `openssl rand -hex 32`)",
+				len(token), MinAPITokenLength)
+		}
+		if names[token] {
+			return nil, fmt.Errorf("config: API_TOKENS repeats a token; each token must be unique")
+		}
+		names[token] = true
+	}
+	return tokens, nil
 }
 
 // MinRefreshInterval is the shortest REFRESH_INTERVAL accepted. Below it a
@@ -216,6 +264,10 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	cfg.ReadOnly, err = envBool("READ_ONLY")
+	if err != nil {
+		return nil, err
+	}
+	cfg.APITokens, err = ParseAPITokens(os.Getenv("API_TOKENS"))
 	if err != nil {
 		return nil, err
 	}
