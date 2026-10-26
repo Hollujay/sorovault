@@ -145,7 +145,7 @@ func (r *Registry) VerifyPublisher(ctx context.Context, req PublisherClaim) (*st
 		return nil, err
 	}
 	r.log.InfoContext(ctx, "publisher verified",
-		"contract_id", claim.ContractID, "network", network, "publisher", req.Signer)
+		"network", stellar.NetworkName(network))
 	return verified, nil
 }
 

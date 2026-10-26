@@ -189,7 +189,7 @@ func (r *Refresher) sweepAndLog(ctx context.Context) {
 	sum, err := r.Sweep(ctx)
 	if err != nil {
 		if ctx.Err() == nil {
-			r.log.WarnContext(ctx, "refresh sweep failed", "error", err)
+			r.log.WarnContext(ctx, "refresh sweep failed")
 		}
 		return
 	}
@@ -287,12 +287,11 @@ func (r *Refresher) sweep(ctx context.Context, all bool) (Summary, error) {
 
 			if !rateLimitLogged {
 				r.log.WarnContext(ctx, "RPC rate-limited refresh sweep; backing off",
-					"contract_id", contract.ContractID, "network", network,
-					"delay", rateLimitBackoff, "error", err)
+					"network", stellar.NetworkName(network), "delay", rateLimitBackoff)
 				rateLimitLogged = true
 			} else {
 				r.log.DebugContext(ctx, "RPC still rate-limiting refresh sweep",
-					"contract_id", contract.ContractID, "network", network,
+					"network", stellar.NetworkName(network),
 					"delay", rateLimitBackoff)
 			}
 
@@ -336,13 +335,11 @@ func (r *Refresher) recordRefresh(ctx context.Context, network string, contract 
 		// problem where there is none.
 		if errors.Is(err, registry.ErrBusy) {
 			sum.Busy++
-			r.log.DebugContext(ctx, "refresh deferred, registry busy",
-				"contract_id", contract.ContractID, "network", network)
+			r.log.DebugContext(ctx, "refresh deferred, registry busy")
 			return
 		}
 		sum.Failed++
-		r.log.WarnContext(ctx, "refresh failed",
-			"contract_id", contract.ContractID, "network", network, "error", err)
+		r.log.WarnContext(ctx, "refresh failed")
 		return
 	}
 
@@ -354,11 +351,10 @@ func (r *Refresher) recordRefresh(ctx context.Context, network string, contract 
 		sum.Missing++
 		if contract.MissingSince == nil {
 			r.log.WarnContext(ctx, "contract no longer on the network",
-				"contract_id", contract.ContractID, "network", network,
-				"missing_since", result.Contract.MissingSince)
+				"network", stellar.NetworkName(network), "missing_since", result.Contract.MissingSince)
 		} else {
 			r.log.DebugContext(ctx, "contract still missing",
-				"contract_id", contract.ContractID, "network", network,
+				"network", stellar.NetworkName(network),
 				"missing_since", contract.MissingSince)
 		}
 		return
@@ -391,8 +387,7 @@ func (r *Refresher) notify(ctx context.Context, network string, result *registry
 	}
 
 	if err := r.notifier.Notify(ctx, change); err != nil {
-		r.log.WarnContext(ctx, "refresh webhook failed",
-			"contract_id", change.ContractID, "network", network, "error", err)
+		r.log.WarnContext(ctx, "refresh webhook failed")
 	}
 }
 
@@ -404,7 +399,7 @@ func (r *Refresher) notifySubscribers(ctx context.Context, change Change) {
 	db := r.reg.Store()
 	items, err := db.ListSubscriptions(ctx)
 	if err != nil {
-		r.log.WarnContext(ctx, "listing webhook subscriptions failed", "error", err)
+		r.log.WarnContext(ctx, "listing webhook subscriptions failed")
 		return
 	}
 	for _, item := range items {
@@ -413,15 +408,14 @@ func (r *Refresher) notifySubscribers(ctx context.Context, change Change) {
 		}
 		sub, err := db.GetSubscription(ctx, item.ID)
 		if err != nil {
-			r.log.WarnContext(ctx, "reading webhook subscription failed", "subscription", item.ID, "error", err)
+			r.log.WarnContext(ctx, "reading webhook subscription failed")
 			continue
 		}
 		if !slices.Contains(sub.ContractIDs, change.ContractID) {
 			continue
 		}
 		if err := deliverWebhook(ctx, sub.URL, sub.ID, change, r.now, r.log, nil, 0); err != nil {
-			r.log.WarnContext(ctx, "subscription webhook failed",
-				"contract_id", change.ContractID, "error", err)
+			r.log.WarnContext(ctx, "subscription webhook failed")
 		}
 	}
 }

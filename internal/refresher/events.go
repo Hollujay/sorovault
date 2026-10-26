@@ -49,7 +49,7 @@ func (r *Refresher) FollowEvents(ctx context.Context) {
 		case err != nil && ctx.Err() == nil:
 			// One line per outage, not one per tick.
 			if !failing {
-				r.log.WarnContext(ctx, "following upgrade events failed", "error", err)
+				r.log.WarnContext(ctx, "following upgrade events failed")
 			}
 			failing = true
 		case err == nil:
@@ -105,7 +105,7 @@ func (r *Refresher) PollEvents(ctx context.Context) (Summary, error) {
 	saved, err := st.GetState(ctx, key)
 	if errors.Is(err, store.ErrNotFound) {
 		r.log.InfoContext(ctx, "no saved event position, starting from now after a full sweep",
-			"network", network)
+			"network", stellar.NetworkName(network))
 		return r.resync(ctx, network)
 	}
 	if err != nil {
@@ -117,7 +117,7 @@ func (r *Refresher) PollEvents(ctx context.Context) (Summary, error) {
 		page, err := r.events.ExecutableUpdates(ctx, pos, eventPageSize)
 		if errors.Is(err, stellar.ErrPositionExpired) {
 			r.log.WarnContext(ctx, "event position is older than the RPC retains, falling back to a full sweep",
-				"network", network, "error", err)
+				"network", stellar.NetworkName(network))
 			resynced, err := r.resync(ctx, network)
 			sum.add(resynced)
 			return sum, err
@@ -187,7 +187,7 @@ func (r *Refresher) refreshUpdated(ctx context.Context, network string, updates 
 			if !errors.Is(err, store.ErrNotFound) {
 				sum.Failed++
 				r.log.WarnContext(ctx, "looking up upgraded contract failed",
-					"contract_id", id, "network", network, "error", err)
+					"network", stellar.NetworkName(network))
 			}
 			continue
 		}

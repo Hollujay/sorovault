@@ -136,7 +136,8 @@ func TestSweepAndLogLogsSuccessfulSweep(t *testing.T) {
 }
 
 // TestSweepAndLogWarnsOnFailure proves a sweep that cannot start is reported
-// as a warning carrying the error, not as a completed summary.
+// as a warning, not as a completed summary. The underlying error is kept out
+// of logs because it may contain sensitive RPC details.
 func TestSweepAndLogWarnsOnFailure(t *testing.T) {
 	t.Parallel()
 
@@ -149,7 +150,7 @@ func TestSweepAndLogWarnsOnFailure(t *testing.T) {
 	record := records[0]
 	assert.Equal(t, "WARN", record["level"])
 	assert.Equal(t, "refresh sweep failed", record["msg"])
-	assert.Contains(t, record["error"], "rpc down", "the warning must carry the error")
+	assert.NotContains(t, record, "error", "the warning must not expose the underlying error")
 }
 
 // TestSweepAndLogSilentOnCancellation proves a shutdown is not reported as a

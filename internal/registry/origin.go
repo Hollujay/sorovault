@@ -49,10 +49,9 @@ func (r *Registry) recordOrigin(ctx context.Context, contractID string) {
 	found, err := r.LocateOrigin(ctx, contractID)
 	switch {
 	case err != nil && ctx.Err() == nil:
-		r.log.WarnContext(ctx, "could not determine contract origin",
-			"contract_id", contractID, "error", err)
+		r.log.WarnContext(ctx, "could not determine contract origin")
 	case !found && err == nil:
-		r.log.DebugContext(ctx, "contract origin unknown", "contract_id", contractID)
+		r.log.DebugContext(ctx, "contract origin unknown")
 	}
 }
 
@@ -108,7 +107,7 @@ func (r *Registry) BackfillOrigins(ctx context.Context) (BackfillSummary, error)
 		switch {
 		case err != nil:
 			sum.Failed++
-			r.log.WarnContext(ctx, "backfill failed", "contract_id", id, "error", err)
+			r.log.WarnContext(ctx, "backfill failed")
 		case found:
 			sum.Found++
 		default:

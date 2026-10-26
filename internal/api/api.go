@@ -394,8 +394,7 @@ func (s *Server) attest(w http.ResponseWriter, r *http.Request, st attest.Statem
 	}
 	sig, err := s.signer.Sign(st)
 	if err != nil {
-		s.log.ErrorContext(r.Context(), "signing interface response failed",
-			"path", r.URL.Path, "error", err)
+		s.log.ErrorContext(r.Context(), "signing interface response failed")
 		return
 	}
 	w.Header().Set(attest.SignatureHeader, sig)
@@ -1349,8 +1348,7 @@ func (s *Server) errorStatus(r *http.Request, err error) (int, string) {
 		return http.StatusBadRequest, err.Error()
 
 	default:
-		s.log.ErrorContext(r.Context(), "request failed",
-			"path", r.URL.Path, "method", r.Method, "error", err)
+		s.log.ErrorContext(r.Context(), "request failed")
 		return http.StatusInternalServerError, "internal error"
 	}
 }
