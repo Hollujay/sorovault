@@ -203,14 +203,15 @@ func (p *Postgres) Save(ctx context.Context, c Contract, iface *model.Interface)
 	// Re-registering an unchanged contract must not append a duplicate
 	// version, so a repeat hash refreshes the existing row in place.
 	const insertSpec = `
-		INSERT INTO specs (network, contract_id, wasm_hash, spec, symbols, observed_ledger)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO specs (network, contract_id, wasm_hash, spec, symbols, docs_tsv, observed_ledger)
+		VALUES ($1, $2, $3, $4, $5, to_tsvector('simple', $6), $7)
 		ON CONFLICT (network, contract_id, wasm_hash) DO UPDATE SET
-			spec    = EXCLUDED.spec,
-			symbols = EXCLUDED.symbols`
+			spec     = EXCLUDED.spec,
+			symbols  = EXCLUDED.symbols,
+			docs_tsv = EXCLUDED.docs_tsv`
 
 	if _, err := tx.Exec(ctx, insertSpec,
-		c.Network, c.ContractID, c.CurrentWasmHash, body, joinSymbols(iface), c.ObservedLedger); err != nil {
+		c.Network, c.ContractID, c.CurrentWasmHash, body, joinSymbols(iface), joinDocs(iface), c.ObservedLedger); err != nil {
 		return fmt.Errorf("store: saving spec for %s: %w", c.ContractID, err)
 	}
 
@@ -390,8 +391,8 @@ func (p *Postgres) Import(ctx context.Context, snapshot *Snapshot, merge bool) e
 		ON CONFLICT (network, contract_id) DO NOTHING`
 
 	const insertSpec = `
-		INSERT INTO specs (network, contract_id, wasm_hash, spec, symbols, decoded_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO specs (network, contract_id, wasm_hash, spec, symbols, docs_tsv, decoded_at)
+		VALUES ($1, $2, $3, $4, $5, to_tsvector('simple', $6), $7)
 		ON CONFLICT (network, contract_id, wasm_hash) DO NOTHING`
 
 	for _, cs := range snapshot.Contracts {
@@ -409,7 +410,7 @@ func (p *Postgres) Import(ctx context.Context, snapshot *Snapshot, merge bool) e
 			}
 			if _, err := tx.Exec(ctx, insertSpec,
 				c.Network, c.ContractID, version.WasmHash, body,
-				joinSymbols(version.Interface), version.DecodedAt); err != nil {
+				joinSymbols(version.Interface), joinDocs(version.Interface), version.DecodedAt); err != nil {
 				return fmt.Errorf("store: importing spec for %s: %w", c.ContractID, err)
 			}
 		}
@@ -437,10 +438,20 @@ func (p *Postgres) ListContracts(ctx context.Context, f ListFilter) (*ContractPa
 	// one list: it cannot say whether "transfer" is a function or a type.
 	// Asking the jsonb keeps that distinction, and costs a scan of one
 	// spec per row rather than a schema change.
+	//
+	// $2 also reaches the doc comments: a query matches either a name or
+	// a word in the docs the GIN-indexed docs_tsv carries, one prefix
+	// query per term at $11. The terms are the lowercase alphanumeric
+	// words matchDocs splits out of the query for the memory store, so
+	// both stores look for exactly the same words. Rows that match by
+	// name rank as name_hit and sort ahead of doc-only matches.
 	const q = `
 		WITH matched AS (
 			SELECT c.network, c.contract_id, c.current_wasm_hash, c.name, c.source_url, c.source_commit,
-			       c.first_seen, c.last_refreshed, c.missing_since, c.implements, COALESCE(s.symbols, '') AS symbols
+			       c.first_seen, c.last_refreshed, c.missing_since, c.implements, COALESCE(s.symbols, '') AS symbols, COALESCE(s.docs_tsv, ''::tsvector) AS docs,
+			       ($2 = '' OR c.contract_id ILIKE '%' || $2 || '%'
+			               OR c.name ILIKE '%' || $2 || '%'
+			               OR s.symbols ILIKE '%' || $2 || '%') AS name_hit
 			FROM contracts c
 			LEFT JOIN specs s
 			  ON s.network = c.network AND s.contract_id = c.contract_id
@@ -448,7 +459,12 @@ func (p *Postgres) ListContracts(ctx context.Context, f ListFilter) (*ContractPa
 			WHERE ($1 = '' OR c.network = $1)
 			  AND ($2 = '' OR c.contract_id ILIKE '%' || $2 || '%'
 			               OR c.name ILIKE '%' || $2 || '%'
-			               OR s.symbols ILIKE '%' || $2 || '%')
+			               OR s.symbols ILIKE '%' || $2 || '%'
+			               OR (cardinality(COALESCE($11::text[], '{}'::text[])) > 0
+			                   AND NOT EXISTS (
+			                       SELECT 1
+			                       FROM unnest(COALESCE($11::text[], '{}'::text[])) AS term(word)
+			                       WHERE NOT (COALESCE(s.docs_tsv, ''::tsvector) @@ to_tsquery('simple', term.word || ':*')))))
 			  AND NOT EXISTS (
 			      SELECT 1 FROM unnest(COALESCE($3::text[], '{}'::text[])) AS want(name)
 			      WHERE NOT EXISTS (
@@ -471,14 +487,16 @@ func (p *Postgres) ListContracts(ctx context.Context, f ListFilter) (*ContractPa
 			  AND (COALESCE(cardinality($5::text[]), 0) = 0 OR c.implements @> $5::text[])
 		)
 		SELECT network, contract_id, current_wasm_hash, name, source_url, source_commit, first_seen, last_refreshed,
-		       missing_since, implements, symbols, count(*) OVER () AS total
+		       missing_since, implements, symbols, name_hit, count(*) OVER () AS total
 		FROM matched
 		WHERE ($8::timestamptz IS NULL
-		       OR last_refreshed < $8
-		       OR (last_refreshed = $8
-		           AND (contract_id > $9
-		                OR (contract_id = $9 AND network > $10))))
-		ORDER BY last_refreshed DESC, contract_id, network
+		       OR (CASE WHEN name_hit THEN 0 ELSE 1 END) > $12
+		       OR ((CASE WHEN name_hit THEN 0 ELSE 1 END) = $12
+		           AND (last_refreshed < $8
+		                OR (last_refreshed = $8
+		                    AND (contract_id > $9
+		                         OR (contract_id = $9 AND network > $10))))))
+		ORDER BY (CASE WHEN name_hit THEN 0 ELSE 1 END), last_refreshed DESC, contract_id, network
 		LIMIT ($6+1) OFFSET $7`
 
 	// The cursor pages by key: strictly after the row the cursor names,
@@ -487,6 +505,7 @@ func (p *Postgres) ListContracts(ctx context.Context, f ListFilter) (*ContractPa
 	// exists; the extra row is dropped below.
 	var cursorTime *time.Time
 	var cursorID, cursorNetwork string
+	var cursorTier int
 	if f.Cursor != "" {
 		if f.Offset != 0 {
 			return nil, errors.New("store: a cursor and an offset are exclusive")
@@ -501,10 +520,13 @@ func (p *Postgres) ListContracts(ctx context.Context, f ListFilter) (*ContractPa
 		}
 		cursorTime = &t
 		cursorID, cursorNetwork = cur.ContractID, cur.Network
+		// The SQL ranks a name hit 0 and a doc-only match 1; the cursor
+		// carries the rank of the row it was minted from.
+		cursorTier = cur.Rank
 	}
 
 	rows, err := p.pool.Query(ctx, q, f.Network, escapeLike(f.Query), f.Functions, f.Types, f.Implements, f.Limit, f.Offset,
-		cursorTime, cursorID, cursorNetwork)
+		cursorTime, cursorID, cursorNetwork, docMatchLower(f.Query), cursorTier)
 	if err != nil {
 		return nil, fmt.Errorf("store: listing contracts: %w", err)
 	}
@@ -512,19 +534,29 @@ func (p *Postgres) ListContracts(ctx context.Context, f ListFilter) (*ContractPa
 
 	page := &ContractPage{Contracts: []Contract{}}
 	fetched := []Contract{}
+	ranks := []int{}
 	for rows.Next() {
 		var c Contract
 		var symbols string
+		var nameHit bool
 		var total int
 		if err := rows.Scan(
 			&c.Network, &c.ContractID, &c.CurrentWasmHash, &c.Name, &c.SourceURL, &c.SourceCommit,
-			&c.FirstSeen, &c.LastRefreshed, &c.MissingSince, &c.Implements, &symbols, &total,
+			&c.FirstSeen, &c.LastRefreshed, &c.MissingSince, &c.Implements, &symbols, &nameHit, &total,
 		); err != nil {
 			return nil, fmt.Errorf("store: scanning contract: %w", err)
+		}
+		// An unqueried listing computes name_hit true for every row, but
+		// its rank is meaningless: it sorts on refresh time alone, and the
+		// cursors it mints sit at the name tier the decode treats as 0.
+		rank := 0
+		if f.Query != "" {
+			rank = docRank(nameHit)
 		}
 		c.Matches = matchSymbols(symbols, f.Query)
 		page.Total = total
 		fetched = append(fetched, c)
+		ranks = append(ranks, rank)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("store: listing contracts: %w", err)
@@ -534,8 +566,7 @@ func (p *Postgres) ListContracts(ctx context.Context, f ListFilter) (*ContractPa
 	// itself wants is the rows before it.
 	if len(fetched) > f.Limit {
 		fetched = fetched[:f.Limit]
-		last := fetched[len(fetched)-1]
-		next, err := encodeListCursor(last)
+		next, err := encodeListCursor(fetched[f.Limit-1], ranks[f.Limit-1])
 		if err != nil {
 			return nil, err
 		}
@@ -809,7 +840,8 @@ func (p *Postgres) countUpgrades(ctx context.Context, network string) (int, erro
 
 func (p *Postgres) countContracts(ctx context.Context, f ListFilter) (int, error) {
 	// Must mirror ListContracts' predicate, or a page past the end would
-	// report a different total from the pages before it.
+	// report a different total from the pages before it. $6 is the
+	// doc-search term array the listing statement gets as $11.
 	const q = `
 		SELECT count(*)
 		FROM contracts c
@@ -819,7 +851,12 @@ func (p *Postgres) countContracts(ctx context.Context, f ListFilter) (int, error
 		WHERE ($1 = '' OR c.network = $1)
 		  AND ($2 = '' OR c.contract_id ILIKE '%' || $2 || '%'
 		               OR c.name ILIKE '%' || $2 || '%'
-		               OR s.symbols ILIKE '%' || $2 || '%')
+		               OR s.symbols ILIKE '%' || $2 || '%'
+		               OR (cardinality(COALESCE($6::text[], '{}'::text[])) > 0
+		                   AND NOT EXISTS (
+		                       SELECT 1
+		                       FROM unnest(COALESCE($6::text[], '{}'::text[])) AS term(word)
+		                       WHERE NOT (COALESCE(s.docs_tsv, ''::tsvector) @@ to_tsquery('simple', term.word || ':*')))))
 		  AND NOT EXISTS (
 		      SELECT 1 FROM unnest(COALESCE($3::text[], '{}'::text[])) AS want(name)
 		      WHERE NOT EXISTS (
@@ -842,7 +879,7 @@ func (p *Postgres) countContracts(ctx context.Context, f ListFilter) (int, error
 		  AND (COALESCE(cardinality($5::text[]), 0) = 0 OR c.implements @> $5::text[])`
 
 	var total int
-	if err := p.pool.QueryRow(ctx, q, f.Network, escapeLike(f.Query), f.Functions, f.Types, f.Implements).Scan(&total); err != nil {
+	if err := p.pool.QueryRow(ctx, q, f.Network, escapeLike(f.Query), f.Functions, f.Types, f.Implements, docMatchLower(f.Query)).Scan(&total); err != nil {
 		return 0, fmt.Errorf("store: counting contracts: %w", err)
 	}
 	return total, nil

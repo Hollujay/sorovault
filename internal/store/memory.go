@@ -633,7 +633,15 @@ func (m *Memory) ListContracts(ctx context.Context, f ListFilter) (*ContractPage
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	matched := make([]Contract, 0, len(m.contracts))
+	// docRows are the matches with their search rank: a name hit sorts in
+	// front of a doc-only hit when the listing was filtered by a query,
+	// and the cursor that pages the result has to carry the same rank.
+	// Rank rides with the row so the sort cannot de-sync them.
+	type docRow struct {
+		contract Contract
+		rank     int
+	}
+	rows := make([]docRow, 0, len(m.contracts))
 	needle := strings.ToLower(f.Query)
 	for k, c := range m.contracts {
 		if f.Network != "" && c.Network != f.Network {
@@ -642,43 +650,55 @@ func (m *Memory) ListContracts(ctx context.Context, f ListFilter) (*ContractPage
 		if len(f.Implements) > 0 && !hasAllStandards(c.Implements, f.Implements) {
 			continue
 		}
-		if needle != "" {
-			c.Matches = matchSymbols(m.currentSymbols(k, c.CurrentWasmHash), f.Query)
-			if len(c.Matches) == 0 &&
-				!strings.Contains(strings.ToLower(c.ContractID), needle) &&
-				!strings.Contains(strings.ToLower(c.Name), needle) {
-				continue
-			}
-		}
 		if len(f.Functions) > 0 || len(f.Types) > 0 {
 			if !hasAll(m.currentInterface(k, c.CurrentWasmHash), f.Functions, f.Types) {
 				continue
 			}
 		}
+		// An unqueried listing has no rank: it sorts on refresh time alone
+		// and every cursor it mints sits at the name tier.
+		rank := 0
+		if needle != "" {
+			c.Matches = matchSymbols(m.currentSymbols(k, c.CurrentWasmHash), f.Query)
+			nameHit := len(c.Matches) > 0 ||
+				strings.Contains(strings.ToLower(c.ContractID), needle) ||
+				strings.Contains(strings.ToLower(c.Name), needle)
+			if !nameHit && !matchDocs(m.currentDocs(k, c.CurrentWasmHash), f.Query) {
+				continue
+			}
+			rank = docRank(nameHit)
+		}
 		c.MissingSince = copyMissing(c.MissingSince)
-		matched = append(matched, c)
+		rows = append(rows, docRow{contract: c, rank: rank})
 	}
 
-	sort.Slice(matched, func(i, j int) bool { return contractListBefore(matched[i], matched[j]) })
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].rank != rows[j].rank {
+			return rows[i].rank < rows[j].rank
+		}
+		return contractListBefore(rows[i].contract, rows[j].contract)
+	})
 
 	// A cursor pages by key: the next page starts at the first row that
 	// sorts strictly after the one the cursor names. The slice is already
 	// in listing order, so that is one binary search, not a scan.
 	start := 0
 	if cur.ContractID != "" {
-		start = sort.Search(len(matched), func(i int) bool {
-			return afterListCursor(matched[i], cur)
+		start = sort.Search(len(rows), func(i int) bool {
+			return afterListCursor(rows[i].contract, rows[i].rank, cur)
 		})
 	} else {
 		start = f.Offset
 	}
 
-	page := &ContractPage{Total: len(matched), Contracts: []Contract{}}
-	if start < len(matched) {
-		end := min(start+f.Limit, len(matched))
-		page.Contracts = append(page.Contracts, matched[start:end]...)
-		if end < len(matched) {
-			next, err := encodeListCursor(matched[end-1])
+	page := &ContractPage{Total: len(rows), Contracts: []Contract{}}
+	if start < len(rows) {
+		end := min(start+f.Limit, len(rows))
+		for _, r := range rows[start:end] {
+			page.Contracts = append(page.Contracts, r.contract)
+		}
+		if end < len(rows) {
+			next, err := encodeListCursor(rows[end-1].contract, rows[end-1].rank)
 			if err != nil {
 				return nil, err
 			}
@@ -763,6 +783,17 @@ func (m *Memory) currentSymbols(k, wasmHash string) string {
 	for _, s := range m.specs[k] {
 		if s.WasmHash == wasmHash {
 			return joinSymbols(s.Interface)
+		}
+	}
+	return ""
+}
+
+// currentDocs returns the joined doc comments of the spec a contract
+// currently runs. The caller holds m.mu.
+func (m *Memory) currentDocs(k, wasmHash string) string {
+	for _, s := range m.specs[k] {
+		if s.WasmHash == wasmHash {
+			return joinDocs(s.Interface)
 		}
 	}
 	return ""

@@ -48,7 +48,7 @@
         "summary": "List or search contracts",
         "operationId": "listContracts",
         "parameters": [
-          { "name": "q", "in": "query", "description": "Case-insensitive substring of the contract ID, its name, or a function, type or event name in its current interface.", "schema": { "type": "string" } },
+          { "name": "q", "in": "query", "description": "Case-insensitive substring of the contract ID, its name, or a function, type or event name in its current interface. Failing those, a word search over the doc comments of its functions and user-defined types, where every word of the query must be found; doc matches rank below name matches.", "schema": { "type": "string" } },
           { "name": "function", "in": "query", "description": "Only contracts whose current interface declares a function with exactly this name. Repeatable; every name must match. Case-sensitive.", "schema": { "type": "array", "items": { "type": "string" } }, "style": "form", "explode": true },
           { "name": "type", "in": "query", "description": "Only contracts whose current interface declares a user-defined type with exactly this name. Repeatable; every name must match. Case-sensitive.", "schema": { "type": "array", "items": { "type": "string" } }, "style": "form", "explode": true },
           { "name": "implements", "in": "query", "description": "Only contracts implementing every listed standard interface ID, such as sep41. Repeatable.", "schema": { "type": "array", "items": { "type": "string" } }, "style": "form", "explode": true },

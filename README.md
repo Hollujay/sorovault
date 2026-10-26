@@ -467,6 +467,12 @@ contract in the registry. When a symbol matched, the listing says which:
 { "contract_id": "CDZZ…4PAN", "network": "testnet", "matches": ["has_voted", "vote"] }
 ```
 
+A query that matches no name is also matched against the doc comments of the
+contract's functions and user-defined types (not events): there, every word
+of the query must appear as a word of some doc, so `?q=swap rewards` asks
+for both. Contracts whose names matched rank ahead of contracts only their
+documentation matched.
+
 A function removed by an upgrade stops matching; older versions stay
 retrievable by hash but are not searched.
 
