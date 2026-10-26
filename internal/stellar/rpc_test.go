@@ -454,6 +454,15 @@ func TestNetworkName(t *testing.T) {
 	}
 }
 
+func TestNetworkLogLabel(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, "public", stellar.NetworkLogLabel("public"))
+	assert.Equal(t, "testnet", stellar.NetworkLogLabel("testnet"))
+	assert.Equal(t, "futurenet", stellar.NetworkLogLabel("futurenet"))
+	assert.Equal(t, "unknown", stellar.NetworkLogLabel("Standalone Network ; February 2017"))
+}
+
 func TestValidateContractID(t *testing.T) {
 	t.Parallel()
 

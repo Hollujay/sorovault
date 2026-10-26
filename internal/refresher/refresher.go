@@ -287,11 +287,11 @@ func (r *Refresher) sweep(ctx context.Context, all bool) (Summary, error) {
 
 			if !rateLimitLogged {
 				r.log.WarnContext(ctx, "RPC rate-limited refresh sweep; backing off",
-					"network", stellar.NetworkName(network), "delay", rateLimitBackoff)
+					"network", stellar.NetworkLogLabel(network), "delay", rateLimitBackoff)
 				rateLimitLogged = true
 			} else {
 				r.log.DebugContext(ctx, "RPC still rate-limiting refresh sweep",
-					"network", stellar.NetworkName(network),
+					"network", stellar.NetworkLogLabel(network),
 					"delay", rateLimitBackoff)
 			}
 
@@ -351,10 +351,10 @@ func (r *Refresher) recordRefresh(ctx context.Context, network string, contract 
 		sum.Missing++
 		if contract.MissingSince == nil {
 			r.log.WarnContext(ctx, "contract no longer on the network",
-				"network", stellar.NetworkName(network), "missing_since", result.Contract.MissingSince)
+				"network", stellar.NetworkLogLabel(network), "missing_since", result.Contract.MissingSince)
 		} else {
 			r.log.DebugContext(ctx, "contract still missing",
-				"network", stellar.NetworkName(network),
+				"network", stellar.NetworkLogLabel(network),
 				"missing_since", contract.MissingSince)
 		}
 		return

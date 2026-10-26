@@ -105,7 +105,7 @@ func (r *Refresher) PollEvents(ctx context.Context) (Summary, error) {
 	saved, err := st.GetState(ctx, key)
 	if errors.Is(err, store.ErrNotFound) {
 		r.log.InfoContext(ctx, "no saved event position, starting from now after a full sweep",
-			"network", stellar.NetworkName(network))
+			"network", stellar.NetworkLogLabel(network))
 		return r.resync(ctx, network)
 	}
 	if err != nil {
@@ -117,7 +117,7 @@ func (r *Refresher) PollEvents(ctx context.Context) (Summary, error) {
 		page, err := r.events.ExecutableUpdates(ctx, pos, eventPageSize)
 		if errors.Is(err, stellar.ErrPositionExpired) {
 			r.log.WarnContext(ctx, "event position is older than the RPC retains, falling back to a full sweep",
-				"network", stellar.NetworkName(network))
+				"network", stellar.NetworkLogLabel(network))
 			resynced, err := r.resync(ctx, network)
 			sum.add(resynced)
 			return sum, err
@@ -187,7 +187,7 @@ func (r *Refresher) refreshUpdated(ctx context.Context, network string, updates 
 			if !errors.Is(err, store.ErrNotFound) {
 				sum.Failed++
 				r.log.WarnContext(ctx, "looking up upgraded contract failed",
-					"network", stellar.NetworkName(network))
+					"network", stellar.NetworkLogLabel(network))
 			}
 			continue
 		}

@@ -88,6 +88,22 @@ func NetworkName(passphrase string) string {
 	}
 }
 
+// NetworkLogLabel returns a safe label for logs. NetworkName preserves an
+// unrecognised passphrase so private and future networks get distinct storage
+// namespaces; that passphrase must not be emitted to logs.
+func NetworkLogLabel(network string) string {
+	switch network {
+	case "public":
+		return "public"
+	case "testnet":
+		return "testnet"
+	case "futurenet":
+		return "futurenet"
+	default:
+		return "unknown"
+	}
+}
+
 // Well-known network passphrases.
 const (
 	NetworkPublic    = "Public Global Stellar Network ; September 2015"
